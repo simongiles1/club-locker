@@ -1,0 +1,2468 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #0f172a;
+  background: #f8fafc;
+  line-height: 1.5;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100vh;
+}
+.layout--fill-viewport {
+  height: 100vh;
+  height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+.layout--fill-viewport nav {
+  overflow-y: auto;
+}
+nav {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 1rem;
+}
+nav button {
+  display: block;
+  width: 100%;
+  margin: 0.25rem 0;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+nav button.active {
+  background: #334155;
+}
+main {
+  padding: 1.5rem;
+  max-width: 1200px;
+}
+main.main--fill-viewport {
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0.75rem;
+}
+main.main--fill-viewport > .row:first-of-type {
+  flex-shrink: 0;
+}
+main.main--fill-viewport > .members-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+.card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+button.primary {
+  background: #2563eb;
+  color: white;
+  border: none;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+button.secondary {
+  background: #e2e8f0;
+  border: none;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+input,
+select {
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+}
+pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.75rem;
+  border-radius: 8px;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+h1 {
+  margin-top: 0;
+}
+
+.booking-tabs-wrap {
+  padding-top: 0.875rem;
+  padding-bottom: 1rem;
+}
+.booking-tablist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border-bottom: 2px solid #e2e8f0;
+  margin: 0 -1rem 0;
+  padding: 0 1rem;
+}
+.booking-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0.65rem 1rem 0.55rem;
+  margin: 0;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  color: #64748b;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  border-radius: 6px 6px 0 0;
+}
+.booking-tab:hover {
+  color: #0f172a;
+  background: rgb(248 250 252 / 0.8);
+}
+.booking-tab[aria-selected="true"] {
+  color: #0f172a;
+  font-weight: 600;
+  border-bottom-color: #2563eb;
+  background: #fff;
+}
+.booking-tab:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.booking-tab-panel {
+  padding-top: 1rem;
+}
+.booking-bulk-notice {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border, #e2e8f0);
+  background: var(--surface-2, #f8fafc);
+  color: #0f172a;
+}
+.booking-bulk-notice--warn {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #78350f;
+}
+.season-bulk-conflict-cards {
+  margin-top: 0.55rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.season-bulk-conflict-card {
+  border: 1px solid rgb(245 158 11 / 0.45);
+  background: #fff;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+}
+.season-bulk-conflict-context {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.3;
+  color: #92400e;
+  font-weight: 600;
+}
+.season-bulk-conflict-detail {
+  margin: 0.15rem 0 0;
+  font-size: 0.92rem;
+  line-height: 1.4;
+  color: #78350f;
+}
+.season-bulk-court-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.2rem;
+  margin-left: 0.15rem;
+  padding: 0.12rem 0.45rem 0.14rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  border: 1px solid rgb(245 158 11 / 0.65);
+  background: rgb(254 243 199 / 0.95);
+  color: #92400e;
+  white-space: nowrap;
+}
+.season-bulk-court-badge-name {
+  text-transform: capitalize;
+}
+.season-bulk-court-badge-ct {
+  font-size: 0.72rem;
+  font-weight: 600;
+  opacity: 0.88;
+  text-transform: lowercase;
+}
+.booking-bulk-notice--ok {
+  border-color: #22c55e;
+  background: #f0fdf4;
+  color: #14532d;
+}
+.booking-bulk-hint {
+  color: #64748b;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.booking-tab-panel[hidden] {
+  display: none !important;
+}
+
+.season-bulk-cal {
+  margin-top: 0.75rem;
+}
+.season-bulk-cal-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.season-bulk-cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.season-bulk-cal-nav button.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  cursor: pointer;
+  color: #0f172a;
+}
+.season-bulk-cal-nav button.icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.season-bulk-cal-range {
+  font-size: 0.9rem;
+  color: #475569;
+  margin: 0;
+  text-align: right;
+  justify-self: end;
+  min-width: 0;
+}
+
+.season-bulk-cal-legend-wrap {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+
+@media (max-width: 52rem) {
+  .season-bulk-cal-toolbar {
+    grid-template-columns: 1fr;
+    justify-items: stretch;
+  }
+
+  .season-bulk-cal-nav {
+    justify-content: center;
+  }
+
+  .season-bulk-cal-range {
+    text-align: center;
+    justify-self: center;
+  }
+}
+
+.season-bulk-cal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.9rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  justify-content: center;
+  font-size: 0.72rem;
+  color: #475569;
+  line-height: 1.3;
+  max-width: 28rem;
+}
+
+.season-bulk-cal-legend li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.season-bulk-legend-swatch {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 3px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.season-bulk-legend-swatch--unbooked {
+  border: 1px solid #1d4ed8;
+  background: linear-gradient(180deg, #dbeafe 0%, #bfdbfe 100%);
+}
+
+.season-bulk-legend-swatch--booked {
+  border: 1px solid #15803d;
+  background: linear-gradient(180deg, #dcfce7 0%, #bbf7d0 100%);
+}
+
+.season-bulk-legend-swatch--holiday {
+  border: 1px solid #b91c1c;
+  background: #dc2626;
+}
+
+.season-bulk-legend-swatch--play-day {
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+}
+
+/* Google Calendar–style week grid (season bulk preview) */
+.gcal-week-scroll {
+  overflow: auto;
+  max-height: min(72vh, 820px);
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+.gcal-week {
+  min-width: 640px;
+}
+.gcal-week-header {
+  display: grid;
+  grid-template-columns: 4.1rem repeat(7, minmax(4.5rem, 1fr));
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+.gcal-week-header-spacer {
+  border-right: 1px solid #e2e8f0;
+}
+.gcal-week-head-cell {
+  padding: 0.45rem 0.35rem;
+  text-align: center;
+  border-right: 1px solid #e2e8f0;
+  line-height: 1.25;
+}
+.gcal-week-head-cell:last-child {
+  border-right: none;
+}
+.gcal-week-head-cell--play {
+  background: #eff6ff;
+}
+.gcal-week-head-dow {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+}
+.gcal-week-head-date {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.gcal-week-head-iso {
+  display: block;
+  font-size: 0.65rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+.gcal-week-body {
+  display: grid;
+  grid-template-columns: 4.1rem 1fr;
+}
+.gcal-time-gutter {
+  position: relative;
+  border-right: 1px solid #e2e8f0;
+  background: #fafafa;
+  flex-shrink: 0;
+}
+.gcal-time-tick {
+  position: absolute;
+  left: 0.2rem;
+  right: 0.35rem;
+  text-align: right;
+  font-size: 0.68rem;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.gcal-day-columns {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(4.5rem, 1fr));
+}
+.gcal-day-col {
+  border-right: 1px solid #e2e8f0;
+  background: #fff;
+}
+.gcal-day-col:last-child {
+  border-right: none;
+}
+.gcal-day-col--play {
+  background: #f8fafc;
+}
+.gcal-day-col--quiet {
+  background: #fcfcfd;
+}
+.gcal-day-col-inner {
+  position: relative;
+}
+.gcal-day-book-capture {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  cursor: context-menu;
+}
+/*
+ * One invisible hit-target per canonical 40‑min window — sits below bulk chips so quiet
+ * days get a precise grey hover; play days still show bulk chip hover when the pointer is
+ * on an event (z-index above this band).
+ */
+.gcal-slot-book-band {
+  position: absolute;
+  left: 3%;
+  right: 3%;
+  box-sizing: border-box;
+  z-index: 1;
+  cursor: context-menu;
+  border-radius: 4px;
+  transition: background-color 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gcal-slot-book-band:hover {
+  background: rgb(148 163 184 / 20%);
+}
+.gcal-slot-book-band-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: rgb(51 65 85);
+  text-align: center;
+  line-height: 1.2;
+  padding: 0 0.15rem;
+  pointer-events: none;
+  opacity: 0;
+  text-shadow:
+    0 0 6px rgb(255 255 255 / 90%),
+    0 1px 0 rgb(248 250 252 / 95%);
+  transition: opacity 0.14s ease;
+}
+.gcal-slot-book-band:hover .gcal-slot-book-band-label {
+  opacity: 1;
+}
+.gcal-day-grid-lines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.gcal-grid-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px solid #f1f5f9;
+}
+.gcal-grid-line--hour {
+  border-top-color: #e2e8f0;
+}
+.gcal-event {
+  position: absolute;
+  left: 3%;
+  right: 3%;
+  box-sizing: border-box;
+  padding: 0.2rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid #1d4ed8;
+  background: linear-gradient(180deg, #dbeafe 0%, #bfdbfe 100%);
+  color: #1e3a8a;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+  z-index: 2;
+}
+.gcal-event--bulk {
+  cursor: default;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    filter 0.18s ease;
+}
+/* Hover only on the slot chip (preview or booked), not the empty column. */
+.gcal-event--bulk:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgb(15 23 42 / 18%);
+  border-color: #2563eb;
+  filter: brightness(1.04);
+}
+.gcal-event--bulk.gcal-event--booked:hover {
+  border-color: #16a34a;
+  box-shadow: 0 6px 16px rgb(21 128 61 / 28%);
+  filter: brightness(1.03);
+}
+.gcal-event--bulk.gcal-event--slot-book {
+  cursor: context-menu;
+}
+/* Same grid chips after Club Locker has an active season hold (vs preview-only blue). */
+.gcal-event--booked {
+  border-color: #15803d;
+  background: linear-gradient(180deg, #dcfce7 0%, #bbf7d0 100%);
+  color: #14532d;
+}
+.gcal-event--booked .gcal-event-court {
+  background: rgb(22 101 52 / 12%);
+  border-color: rgb(22 101 52 / 28%);
+}
+.gcal-event-toprow {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
+  gap: 0.25rem;
+}
+.gcal-event-time {
+  font-size: 0.65rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.95;
+  flex-shrink: 0;
+}
+.gcal-event-box {
+  text-align: right;
+}
+.gcal-event-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gcal-event-meta {
+  font-size: 0.62rem;
+  opacity: 0.88;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gcal-event-courts {
+  display: flex;
+  flex: 1;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0.2rem;
+  width: 100%;
+  min-height: 0;
+  margin-top: 0.05rem;
+}
+.gcal-event-court {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  line-height: 1.1;
+  padding: 0.1rem 0.05rem;
+  border-radius: 2px;
+  background: rgb(59 130 246 / 12%);
+  border: 1px solid rgb(29 78 216 / 25%);
+}
+.gcal-event-court-hd {
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+.gcal-event-court-mu {
+  font-size: 0.58rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.draw-preview-title {
+  margin-top: 0;
+  font-size: 1.15rem;
+}
+.draw-preview-status {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  margin-bottom: 0.75rem;
+}
+.draw-preview-status.draft {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.draw-preview-status.approved {
+  background: #dcfce7;
+  color: #166534;
+}
+.draw-version-meta {
+  color: #64748b;
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+.draw-version-meta code {
+  font-size: 0.85rem;
+  background: #f1f5f9;
+  color: #0f172a;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+}
+.draw-boxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+.draw-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  background: #f8fafc;
+}
+.draw-box h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  color: #334155;
+}
+.draw-player-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.9rem;
+}
+.draw-player-list li {
+  margin-bottom: 0.25rem;
+}
+.draw-player-list li:last-child {
+  margin-bottom: 0;
+}
+
+.weekly-preview-title,
+.weekly-email-stage .weekly-preview-title {
+  margin-top: 0;
+  font-size: 1.15rem;
+}
+.weekly-meta {
+  color: #64748b;
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+.weekly-meta code {
+  font-size: 0.85rem;
+  background: #f1f5f9;
+  color: #0f172a;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+}
+.weekly-empty {
+  margin: 0;
+  color: #64748b;
+}
+.weekly-boxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.weekly-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  background: #f8fafc;
+}
+.weekly-box-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.weekly-box h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #334155;
+}
+.weekly-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.45rem;
+  border-radius: 4px;
+}
+.weekly-badge.managed {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.weekly-badge.self-managed {
+  background: #fef3c7;
+  color: #92400e;
+}
+.weekly-sub {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #64748b;
+}
+.weekly-match-list,
+.weekly-court-list,
+.weekly-id-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.9rem;
+}
+.weekly-match-list li,
+.weekly-court-list li {
+  margin-bottom: 0.35rem;
+}
+.weekly-vs {
+  font-weight: 500;
+  color: #64748b;
+}
+.weekly-byes {
+  margin: 0.65rem 0 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+.weekly-email-stage .weekly-id-list {
+  margin-top: 0.5rem;
+}
+.weekly-id-list code {
+  font-size: 0.8rem;
+  background: #f1f5f9;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+}
+
+/* Schedule — matches director dashboard cards / typography */
+.schedule-lead {
+  color: #64748b;
+  font-size: 0.95rem;
+  margin: 0 0 1rem;
+  max-width: 52rem;
+}
+.schedule-controls-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem 1.5rem;
+  flex: 0 1 auto;
+}
+.schedule-1v6-callout {
+  flex: 1 1 12rem;
+  min-width: min(100%, 12rem);
+  max-width: 28rem;
+  margin: 0;
+  padding: 0.65rem 0.9rem;
+  border: 1px solid #e0e7ff;
+  border-radius: 6px;
+  background: #eef2ff;
+  align-self: center;
+}
+.schedule-1v6-text {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #312e81;
+  line-height: 1.5;
+}
+.schedule-1v6-badge {
+  display: inline-block;
+  margin: 0 0.1rem;
+  padding: 0.12rem 0.45rem;
+  border: 1px solid #6366f1;
+  border-radius: 4px;
+  background: #fff;
+  color: #312e81;
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-family: inherit;
+  line-height: 1.2;
+  cursor: help;
+  vertical-align: baseline;
+  transition: background 0.12s, border-color 0.12s;
+}
+.schedule-1v6-badge:hover,
+.schedule-1v6-badge:focus-visible {
+  background: #e0e7ff;
+  border-color: #4f46e5;
+  outline: none;
+}
+.schedule-1v6-badge:focus-visible {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px #6366f1;
+}
+.schedule-controls {
+  display: flex;
+  flex-wrap: wrap;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem 1.5rem;
+  margin-bottom: 1rem;
+}
+@media (max-width: 52rem) {
+  .schedule-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .schedule-1v6-callout {
+    max-width: none;
+    align-self: stretch;
+  }
+}
+.schedule-controls-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.schedule-day-toggle-label {
+  display: block;
+}
+.schedule-day-toggle {
+  display: inline-flex;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  overflow: hidden;
+  background: #fff;
+}
+.schedule-day-toggle-btn {
+  padding: 0.4rem 0.9rem;
+  border: none;
+  background: transparent;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s, color 0.12s;
+}
+.schedule-day-toggle-btn:hover {
+  background: #f8fafc;
+}
+.schedule-day-toggle-btn + .schedule-day-toggle-btn {
+  border-left: 1px solid #e2e8f0;
+}
+.schedule-day-toggle-btn-active {
+  background: #334155;
+  color: #f1f5f9;
+}
+.schedule-day-toggle-btn-active:hover {
+  background: #1e293b;
+  color: #f1f5f9;
+}
+.schedule-date-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #334155;
+}
+.schedule-inline-icon {
+  width: 1rem;
+  height: 1rem;
+  color: #64748b;
+  flex-shrink: 0;
+}
+.schedule-controls input[type="date"] {
+  min-width: 11rem;
+}
+.schedule-week-card {
+  margin-bottom: 0;
+}
+.schedule-section-title {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #334155;
+}
+.schedule-week-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 600;
+  color: #334155;
+  font-size: 0.85rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.schedule-week-cal {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #64748b;
+}
+.schedule-week-trophy {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex-shrink: 0;
+  color: #f59e0b;
+}
+.schedule-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+.schedule-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.schedule-table thead th {
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #e2e8f0;
+  vertical-align: top;
+}
+.schedule-table-grid .schedule-col-corner {
+  min-width: 3.5rem;
+  width: 4.5rem;
+  background: #f8fafc;
+}
+.schedule-table-grid .schedule-col-week-head {
+  text-align: center;
+  padding: 0.5rem 0.4rem 0.55rem;
+  min-width: 3.5rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #334155;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.schedule-table-grid .schedule-col-week-head[title] {
+  cursor: help;
+}
+.schedule-table-grid .schedule-week-head-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  line-height: 1.3;
+}
+.schedule-table-grid .schedule-thead-meta th,
+.schedule-table-grid .schedule-thead-meta td {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #334155;
+  background: #f1f5f9;
+  border-bottom: 1px solid #e2e8f0;
+  vertical-align: top;
+  padding: 0.5rem 0.45rem;
+}
+.schedule-table-grid .schedule-row-label {
+  min-width: 4.5rem;
+  width: 5rem;
+  text-align: left;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  background: #e8eef5;
+  white-space: nowrap;
+}
+.schedule-table-grid .schedule-cell-matchup,
+.schedule-table-grid .schedule-cell-bye {
+  text-align: center;
+  font-size: 0.82rem;
+  color: #1e293b;
+}
+.schedule-table-grid .schedule-cell-bye {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+.schedule-table-grid thead tr:last-of-type th,
+.schedule-table-grid thead tr:last-of-type td {
+  border-bottom: 2px solid #cbd5e1;
+}
+.schedule-table-grid .schedule-col-time {
+  min-width: 4.5rem;
+}
+.schedule-table-grid td.schedule-cell-level {
+  text-align: center;
+  font-weight: 600;
+  color: #1e40af;
+  width: auto;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.schedule-table tbody tr:nth-child(even) {
+  background: #fafbfc;
+}
+.schedule-table tbody tr:hover {
+  background: #f1f5f9;
+}
+.schedule-table tbody tr:hover th.schedule-cell-time {
+  background: #f1f5f9;
+}
+.schedule-table td,
+.schedule-table tbody th {
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid #e2e8f0;
+  vertical-align: middle;
+  font-weight: normal;
+  text-align: left;
+}
+.schedule-table tbody th.schedule-cell-time {
+  font-weight: 600;
+  padding-left: 0.75rem;
+  background: #fafbfc;
+}
+.schedule-table tbody tr:last-child td,
+.schedule-table tbody tr:last-child th {
+  border-bottom: none;
+}
+.schedule-cell-time {
+  font-weight: 600;
+  color: #334155;
+  white-space: nowrap;
+  width: 5.5rem;
+  text-align: left;
+  font-size: 0.9rem;
+}
+@media (max-width: 520px) {
+  .schedule-table-grid .schedule-thead-meta .schedule-row-label,
+  .schedule-table-grid thead th.schedule-row-label {
+    min-width: 3.5rem;
+  }
+}
+
+/* Members directory */
+.members-page {
+  max-width: 1400px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+main.main--fill-viewport .members-page {
+  max-width: none;
+}
+.members-error-inline {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+  color: #991b1b;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.members-footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  padding-top: 0.65rem;
+  margin-top: 0.25rem;
+  border-top: 1px solid #e2e8f0;
+}
+.members-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  -webkit-overflow-scrolling: touch;
+}
+.members-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.members-table thead {
+  background: #f8fafc;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  box-shadow: 0 1px 0 #e2e8f0;
+}
+.members-table th {
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid #e2e8f0;
+  font-weight: 600;
+  color: #334155;
+  white-space: nowrap;
+}
+.members-th-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: #1e40af;
+  cursor: pointer;
+  padding: 0;
+}
+.members-th-btn:hover {
+  text-decoration: underline;
+}
+.members-table td {
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid #e2e8f0;
+  vertical-align: middle;
+}
+.members-table tbody tr:nth-child(even) {
+  background: #fafbfc;
+}
+.members-table tbody tr:hover {
+  background: #f1f5f9;
+}
+.members-col-photo {
+  width: 3rem;
+}
+.members-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  background: #e0e7ff;
+  color: #3730a3;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.members-avatar-img {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.members-name {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.members-name-full {
+  font-weight: 600;
+}
+.members-username {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+.members-code {
+  font-size: 0.8rem;
+}
+.members-empty {
+  text-align: center;
+  color: #64748b;
+  padding: 2rem 1rem !important;
+}
+.members-table a {
+  color: #2563eb;
+  text-decoration: none;
+}
+.members-table a:hover {
+  text-decoration: underline;
+}
+.members-page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: #334155;
+}
+.members-pager-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+.members-pager-status {
+  font-size: 0.9rem;
+  color: #475569;
+  padding: 0 0.35rem;
+}
+.members-pager-nav button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Houseleague registrants */
+.houseleague-page {
+  max-width: 1200px;
+}
+.houseleague-page-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+.houseleague-page-tabs button {
+  margin: 0;
+  padding: 0.5rem 0.95rem;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.houseleague-page-tabs button.is-active {
+  background: #f1f5f9;
+  color: #0f172a;
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 #334155;
+}
+.houseleague-main-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 0.65rem;
+}
+.houseleague-title {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: min(100%, 12rem);
+}
+.houseleague-header-controls {
+  margin: 0;
+  align-items: flex-end;
+}
+.houseleague-lead {
+  color: #64748b;
+  font-size: 0.95rem;
+  margin: 0 0 1rem;
+  max-width: 52rem;
+}
+.houseleague-banner {
+  font-size: 0.9rem;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+.houseleague-banner--error {
+  color: #991b1b;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+}
+.houseleague-event-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #334155;
+  min-width: min(100%, 36rem);
+  flex: 1 1 auto;
+}
+
+.houseleague-picker {
+  position: relative;
+  width: 100%;
+}
+
+.houseleague-picker-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  min-height: 2.5rem;
+  box-sizing: border-box;
+}
+
+.houseleague-picker-trigger:hover:not(:disabled) {
+  border-color: #94a3b8;
+}
+
+.houseleague-picker-trigger:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.houseleague-picker-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.houseleague-picker-trigger-inner {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.houseleague-picker-placeholder {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.houseleague-picker-chevron {
+  flex-shrink: 0;
+  color: #64748b;
+  transition: transform 0.15s ease;
+}
+
+.houseleague-picker-chevron--open {
+  transform: rotate(180deg);
+}
+
+.houseleague-picker-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  margin: 0;
+  padding: 0.25rem 0;
+  list-style: none;
+  max-height: min(60vh, 26rem);
+  overflow-y: auto;
+  z-index: 50;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow:
+    0 10px 15px -3px rgb(15 23 42 / 12%),
+    0 4px 6px -4px rgb(15 23 42 / 10%);
+}
+
+.houseleague-picker-option {
+  width: 100%;
+  display: block;
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  border: none;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.houseleague-picker-option:hover {
+  background: #f1f5f9;
+}
+
+.houseleague-picker-option:focus-visible {
+  outline: none;
+  background: #eff6ff;
+  box-shadow: inset 0 0 0 2px #2563eb;
+}
+
+.houseleague-picker-option--selected {
+  background: #eff6ff;
+}
+
+.houseleague-picker-option--selected:hover {
+  background: #dbeafe;
+}
+
+.houseleague-event-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.houseleague-event-visibility {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+}
+
+.houseleague-event-visibility-icon {
+  display: block;
+}
+
+.houseleague-event-visibility-icon--visible {
+  color: #64748b;
+}
+
+.houseleague-event-visibility-icon--hidden {
+  color: #b45309;
+}
+
+.houseleague-event-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: #0f172a;
+}
+
+.houseleague-event-dates {
+  flex-shrink: 0;
+  margin-left: 0.75rem;
+  text-align: right;
+  font-size: 0.82rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: #475569;
+  max-width: 46%;
+}
+
+.houseleague-status {
+  margin: 0 0 1rem;
+  font-size: 0.95rem;
+  color: #334155;
+}
+.houseleague-status--muted {
+  color: #64748b;
+}
+.houseleague-box-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.houseleague-box-card {
+  margin-bottom: 0;
+}
+.houseleague-player-row {
+  cursor: grab;
+}
+.houseleague-player-row td {
+  transition: background-color 0.12s ease;
+}
+.houseleague-player-row:hover td {
+  background-color: #eff6ff;
+}
+.houseleague-player-row[draggable="false"] {
+  cursor: default;
+}
+.houseleague-player-row[draggable="false"]:hover td {
+  background-color: transparent;
+}
+.houseleague-player-row:active {
+  cursor: grabbing;
+}
+.houseleague-player-row--dragging {
+  opacity: 0.55;
+}
+.houseleague-box-title {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  color: #334155;
+}
+.houseleague-box-meta {
+  margin: 0 0 0.65rem;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+.houseleague-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  transition:
+    box-shadow 0.12s ease,
+    border-color 0.12s ease;
+}
+.houseleague-table-wrap--drop-hover {
+  box-shadow: 0 0 0 2px #3b82f6;
+  border-color: #93c5fd;
+}
+.houseleague-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.houseleague-table thead {
+  background: #f8fafc;
+}
+.houseleague-table th {
+  text-align: left;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid #e2e8f0;
+  font-weight: 600;
+  color: #64748b;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.houseleague-table td {
+  padding: 0.4rem 0.55rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+.houseleague-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.houseleague-name {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Club Championships                                                         */
+/* -------------------------------------------------------------------------- */
+.champ-help {
+  color: #475569;
+  margin-top: 0;
+  margin-bottom: 1rem;
+  max-width: 70ch;
+  line-height: 1.45;
+}
+.champ-help-small {
+  color: #64748b;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+.champ-page-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+.champ-page-tabs button {
+  margin: 0;
+  padding: 0.5rem 0.95rem;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.champ-page-tabs button.is-active {
+  background: #f1f5f9;
+  color: #0f172a;
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 #334155;
+}
+.champ-round-schedule-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.85rem;
+  margin-top: 1rem;
+}
+.champ-round-schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+.champ-round-schedule-label {
+  color: #475569;
+}
+.champ-round-schedule-field input[type="date"] {
+  max-width: 100%;
+}
+.champ-email-round-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+  color: #334155;
+}
+.champ-email-round-select {
+  min-width: 10rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+}
+.toast-stack {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: min(26rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  padding: 0.65rem 1rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  box-shadow: 0 10px 40px rgba(15, 23, 42, 0.2);
+  animation: toast-in 0.2s ease;
+}
+.toast--info {
+  background: #1e293b;
+  color: #f8fafc;
+}
+.toast--error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.champ-empty {
+  color: #64748b;
+  font-style: italic;
+}
+.champ-badge {
+  display: inline-flex;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.champ-badge--registration {
+  background: #fef3c7;
+  color: #92400e;
+}
+.champ-badge--draft {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.champ-badge--drawn {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+.champ-badge--published {
+  background: #dcfce7;
+  color: #166534;
+}
+.champ-badge--completed {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.champ-roster-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.champ-count {
+  color: #64748b;
+  font-size: 0.85rem;
+}
+.champ-add-row {
+  margin-bottom: 0.75rem;
+}
+.champ-division-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: min(28rem, 100%);
+}
+.champ-division-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #334155;
+}
+.champ-division-select {
+  font-size: 0.9rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  max-width: 100%;
+}
+.champ-division-legend {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #64748b;
+  line-height: 1.35;
+  max-width: 42ch;
+}
+.member-search-select {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: min(28rem, 100%);
+  flex: 1 1 18rem;
+}
+/* In column layouts (e.g. test-email modal), flex-grow stretches the wrapper; the
+   popover is `top: 100%` of that box, so the list appears far below the input. */
+.champ-test-email-field > .member-search-select,
+.champ-test-email-modal .member-search-select,
+.booking-single-match-modal .member-search-select {
+  flex: 0 1 auto;
+  align-self: stretch;
+  min-height: 0;
+}
+.member-search-select--open {
+  z-index: 30;
+}
+.member-picker-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 40;
+  border-radius: 8px;
+  box-shadow:
+    0 10px 25px -5px rgba(15, 23, 42, 0.18),
+    0 4px 10px -4px rgba(15, 23, 42, 0.12);
+}
+.member-picker-heading {
+  font-weight: 700;
+  font-size: 1rem;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+.member-picker-selected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f1f5f9;
+  font-size: 0.95rem;
+}
+.member-picker-selected-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  color: #0f172a;
+}
+.member-picker-selected-clear {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+}
+.member-picker-selected-clear:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+.member-picker-selected-clear:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.member-picker-search {
+  width: 100%;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  background: #fff;
+  color: #1e293b;
+}
+.member-picker-search::placeholder {
+  color: #94a3b8;
+}
+.member-picker-search:focus {
+  outline: none;
+  border-color: #64748b;
+  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.35);
+}
+.member-picker-search:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.member-picker-list {
+  margin: 0;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  max-height: min(280px, 45vh);
+  overflow-y: auto;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.champ-doubles-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  color: #64748b;
+  line-height: 1.4;
+  max-width: 52ch;
+}
+.member-picker-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  border: none;
+  border-bottom: 1px solid #f1f5f9;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: #1e293b;
+}
+.member-picker-option:last-child {
+  border-bottom: none;
+}
+.member-picker-option:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+.member-picker-option:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.member-picker-option.is-selected {
+  background: #e2e8f0;
+}
+.member-picker-option--placeholder {
+  background: #f8fafc;
+  color: #64748b;
+}
+.member-picker-option--placeholder.is-selected {
+  background: #e8eef5;
+  color: #334155;
+}
+.member-picker-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.member-picker-email {
+  flex: 0 1 48%;
+  min-width: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: #64748b;
+}
+.champ-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.champ-table thead {
+  background: #f8fafc;
+}
+.champ-table th {
+  text-align: left;
+  padding: 0.4rem 0.55rem;
+  border-bottom: 1px solid #e2e8f0;
+  font-weight: 600;
+  color: #64748b;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.champ-table td {
+  padding: 0.4rem 0.55rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+.champ-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.champ-email-cell {
+  color: #475569;
+  font-size: 0.85rem;
+}
+.champ-missing {
+  color: #cbd5e1;
+}
+
+.champ-bracket-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.champ-meta {
+  color: #64748b;
+  font-size: 0.85rem;
+}
+.champ-bracket {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  padding-bottom: 0.75rem;
+}
+.champ-round {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 220px;
+}
+.champ-round-title {
+  margin: 0 0 0.5rem 0;
+  color: #475569;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.champ-round-list {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  gap: 0.5rem;
+  flex: 1;
+}
+.champ-match {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0.4rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.champ-match.has-winner {
+  border-color: #86efac;
+}
+.champ-slot {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.88rem;
+  padding: 0.15rem 0.25rem;
+  border-radius: 4px;
+}
+.champ-slot--winner {
+  background: #f0fdf4;
+  font-weight: 600;
+}
+.champ-seed {
+  color: #94a3b8;
+  font-size: 0.75rem;
+  text-align: center;
+}
+.champ-slot-entry-select {
+  font-size: 0.82rem;
+  padding: 0.2rem 0.35rem;
+  min-width: 0;
+  width: 100%;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+.champ-match-scheduled {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.5rem;
+  padding: 0.25rem 0.35rem;
+  margin-top: 0.15rem;
+  border-radius: 6px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  font-size: 0.78rem;
+}
+.champ-match-scheduled-label {
+  font-weight: 600;
+  color: #1d4ed8;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.champ-match-scheduled-time {
+  color: #1e3a5f;
+  font-weight: 500;
+}
+.champ-match-actions {
+  border-top: 1px dashed #e2e8f0;
+  padding-top: 0.35rem;
+  margin-top: 0.125rem;
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.champ-match-winner-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.champ-match-mail {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem 0.4rem;
+  margin: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  line-height: 0;
+  flex: 0 0 auto;
+}
+.champ-match-mail:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+.champ-match-mail:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.champ-match-mail:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+.champ-match-mail-svg {
+  display: block;
+}
+.champ-match-winner {
+  font-size: 0.75rem;
+  color: #475569;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.champ-match-winner select {
+  font-size: 0.78rem;
+  padding: 0.1rem 0.3rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.champ-bracket-actions {
+  margin-top: 0.75rem;
+  align-items: flex-end;
+}
+.champ-due-label {
+  display: inline-flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+  color: #475569;
+  gap: 0.2rem;
+}
+.champ-published-note {
+  color: #166534;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.champ-test-email-btn {
+  font-size: 0.82rem;
+}
+
+.champ-test-email-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.champ-test-email-modal {
+  background: #fff;
+  border-radius: 10px;
+  padding: 1.25rem 1.35rem;
+  max-width: 32rem;
+  width: 100%;
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  box-shadow:
+    0 25px 50px -12px rgba(15, 23, 42, 0.35),
+    0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+
+.champ-test-email-modal h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.1rem;
+}
+
+.champ-test-email-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.85rem;
+  font-size: 0.88rem;
+  color: #334155;
+}
+
+.champ-test-email-field span {
+  font-weight: 600;
+}
+
+.champ-test-email-field input,
+.champ-test-email-field select,
+.champ-test-email-field textarea {
+  font: inherit;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  width: 100%;
+}
+
+.champ-test-email-field textarea {
+  resize: vertical;
+  min-height: 9rem;
+  font-family: inherit;
+}
+
+.champ-test-email-resolved-hint {
+  margin: 0;
+  padding: 0.35rem 0.45rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: #475569;
+  background: #f1f5f9;
+  border-radius: 6px;
+}
+
+.champ-test-email-resolved-label {
+  font-weight: 700;
+  color: #64748b;
+}
+
+.champ-test-email-preview-card {
+  border: 1px solid #e2e8f0;
+}
+
+.champ-test-email-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.champ-test-email-recipients {
+  margin-top: 0.85rem;
+}
+
+.champ-test-email-recipients-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 0.35rem;
+}
+
+.champ-test-email-recipient-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  max-height: 11rem;
+  overflow: auto;
+}
+
+.champ-test-email-recipient-row {
+  display: grid;
+  grid-template-columns: 1fr minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.82rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.champ-test-email-recipient-row:last-child {
+  border-bottom: none;
+}
+
+.champ-test-email-recipient-name {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.champ-test-email-recipient-email {
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.champ-test-email-recipient-remove {
+  padding: 0.2rem 0.45rem;
+  font-size: 0.78rem;
+}
+
+.champ-test-email-recipients-empty {
+  margin-top: 0.75rem;
+}
+
+/* Email templates: {{variable}} autocomplete (Emails → Email templates tab) */
+
+.email-var-ac-root {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.email-var-ac-root textarea,
+.email-var-ac-root input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.email-var-ac-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin-top: 2px;
+  z-index: 50;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  box-shadow:
+    0 8px 20px rgb(15 23 42 / 0.12),
+    0 0 0 1px rgb(15 23 42 / 0.06);
+  max-height: min(260px, 42vh);
+  overflow: hidden auto;
+}
+
+.email-var-ac-hint {
+  padding: 0.45rem 0.65rem;
+  font-size: 0.75rem;
+  color: #64748b;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.email-var-ac-empty {
+  padding: 0.65rem;
+  font-size: 0.84rem;
+  color: #64748b;
+}
+
+.email-var-ac-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem;
+}
+
+.email-var-ac-item {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) 2fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  color: #0f172a;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.email-var-ac-item:hover,
+.email-var-ac-item:focus-visible {
+  background: #f1f5f9;
+  outline: none;
+}
+
+.email-var-ac-item--active,
+.email-var-ac-item.email-var-ac-item--active:hover {
+  background: #dbeafe;
+  color: #0f172a;
+}
+
+.email-var-ac-key {
+  font-size: 0.76rem;
+  color: #1d4ed8;
+}
+
+.email-var-ac-desc {
+  color: #64748b;
+  font-size: 0.78rem;
+}
+
+/* Right-click test booking (Court booking tab) */
+.booking-slot-context-menu {
+  position: fixed;
+  z-index: 2500;
+  min-width: 7.5rem;
+  padding: 0.25rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgb(15 23 42 / 18%);
+}
+
+.booking-slot-context-menu button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  text-align: left;
+  font-size: 0.875rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #0f172a;
+  cursor: pointer;
+}
+
+.booking-slot-context-menu button:hover {
+  background: #f1f5f9;
+}
+
+.booking-single-match-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2600;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10vh 1rem 2rem;
+  box-sizing: border-box;
+  background: rgb(15 23 42 / 42%);
+}
+
+.booking-single-match-modal {
+  width: 100%;
+  max-width: 26rem;
+  padding: 1rem 1.125rem 1rem;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  box-shadow: 0 22px 48px rgb(15 23 42 / 20%);
+}
+
+.booking-single-match-modal h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+}
+
+.booking-single-match-field {
+  margin-top: 0.65rem;
+}
+
+.booking-single-match-field label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 0.25rem;
+}
+
+.booking-single-match-field select {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.875rem;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+}
+
+.booking-single-match-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}

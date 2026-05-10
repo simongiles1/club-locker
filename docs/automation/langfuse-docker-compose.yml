@@ -1,0 +1,27 @@
+version: "3.9"
+services:
+  langfuse-server:
+    image: langfuse/langfuse:2
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: changeme-langfuse-secret
+      SALT: changeme-langfuse-salt
+      NEXTAUTH_URL: http://localhost:3002
+      TELEMETRY_ENABLED: "false"
+    depends_on:
+      - langfuse-db
+  langfuse-db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_pg_data:/var/lib/postgresql/data
+
+volumes:
+  langfuse_pg_data:

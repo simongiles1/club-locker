@@ -1,0 +1,39 @@
+{
+  "name": "@squash/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "db:generate": "drizzle-kit generate",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@google/generative-ai": "^0.24.1",
+    "@squash/shared": "workspace:*",
+    "better-sqlite3": "^11.6.0",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.38.3",
+    "fastify": "^5.2.0",
+    "imapflow": "^1.0.190",
+    "langfuse": "^3.38.20",
+    "mailparser": "^3.9.0",
+    "nodemailer": "^8.0.7",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^22.10.2",
+    "@types/nodemailer": "^8.0.0",
+    "drizzle-kit": "^0.30.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

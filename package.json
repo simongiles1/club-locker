@@ -1,0 +1,23 @@
+{
+  "name": "squash-league-automation",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev:api": "pnpm --filter @squash/api dev",
+    "dev:web": "pnpm --filter @squash/web dev",
+    "dev:web:delayed": "wait-on http://127.0.0.1:3001/health && pnpm dev:web",
+    "dev": "pnpm --filter @squash/shared build && concurrently -k -n api,web -c blue,green \"pnpm dev:api\" \"pnpm dev:web:delayed\"",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "db:push": "pnpm --filter @squash/api db:push",
+    "db:studio": "pnpm --filter @squash/api db:studio"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "wait-on": "^9.0.5"
+  }
+}

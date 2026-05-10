@@ -1,0 +1,217 @@
+/**
+ * Club booking “calendar seasons” and their first-Monday start dates (local timezone).
+ *
+ * - Winter: first Monday on or after 4 January (i.e. strictly after 3 January).
+ * - Spring: first Monday in April, except when 31 March is Monday → that Monday.
+ * - Summer: first Monday in June, except when 31 May is Monday → that Monday.
+ * - Fall: first Monday on or after 1 October.
+ */
+
+export type BookingCalendarSeason = "winter" | "spring" | "summer" | "fall";
+
+export const BOOKING_CALENDAR_SEASONS: readonly BookingCalendarSeason[] = [
+  "winter",
+  "spring",
+  "summer",
+  "fall",
+] as const;
+
+function addDaysLocal(d: Date, days: number): Date {
+  const n = new Date(d.getTime());
+  n.setDate(n.getDate() + days);
+  return n;
+}
+
+/** First Monday on or after the given calendar day (local). */
+export function firstMondayOnOrAfterLocal(
+  year: number,
+  monthIndex: number,
+  day: number,
+): Date {
+  const start = new Date(year, monthIndex, day);
+  const dow = start.getDay();
+  const monOffset = (8 - dow) % 7;
+  return addDaysLocal(start, monOffset);
+}
+
+export function winterStartMondayLocal(year: number): Date {
+  return firstMondayOnOrAfterLocal(year, 0, 4);
+}
+
+export function springStartMondayLocal(year: number): Date {
+  const mar31 = new Date(year, 2, 31);
+  if (mar31.getDay() === 1) return mar31;
+  return firstMondayOnOrAfterLocal(year, 3, 1);
+}
+
+export function summerStartMondayLocal(year: number): Date {
+  const may31 = new Date(year, 4, 31);
+  if (may31.getDay() === 1) return may31;
+  return firstMondayOnOrAfterLocal(year, 5, 1);
+}
+
+export function fallStartMondayLocal(year: number): Date {
+  return firstMondayOnOrAfterLocal(year, 9, 1);
+}
+
+export function seasonStartMondayLocal(
+  season: BookingCalendarSeason,
+  year: number,
+): Date {
+  switch (season) {
+    case "winter":
+      return winterStartMondayLocal(year);
+    case "spring":
+      return springStartMondayLocal(year);
+    case "summer":
+      return summerStartMondayLocal(year);
+    case "fall":
+      return fallStartMondayLocal(year);
+  }
+}
+
+export function formatLocalISODate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function startOfLocalCalendarDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/** Day count from a to b using calendar dates in the local timezone (b may precede a). */
+export function calendarDaysFromTo(a: Date, b: Date): number {
+  const ua = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
+  const ub = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+  return Math.round((ub - ua) / 86400000);
+}
+
+/**
+ * Booking “club year” Y: interval [Winter start Y, Winter start Y+1).
+ */
+export function bookingClubYearContainingDate(d: Date): number {
+  const day = startOfLocalCalendarDay(d);
+  const y = day.getFullYear();
+  const wThis = winterStartMondayLocal(y);
+  if (day < wThis) return y - 1;
+  return y;
+}
+
+function seasonContainingDateInClubYear(
+  Y: number,
+  day: Date,
+): BookingCalendarSeason {
+  const W = winterStartMondayLocal(Y);
+  const Sp = springStartMondayLocal(Y);
+  const Su = summerStartMondayLocal(Y);
+  const F = fallStartMondayLocal(Y);
+  const Wn = winterStartMondayLocal(Y + 1);
+  if (day >= W && day < Sp) return "winter";
+  if (day >= Sp && day < Su) return "spring";
+  if (day >= Su && day < F) return "summer";
+  if (day >= F && day < Wn) return "fall";
+  // Defensive fallback (should not happen when Y = bookingClubYearContainingDate(day))
+  return "fall";
+}
+
+function nextSeasonStartAfter(
+  Y: number,
+  current: BookingCalendarSeason,
+): Date {
+  switch (current) {
+    case "winter":
+      return springStartMondayLocal(Y);
+    case "spring":
+      return summerStartMondayLocal(Y);
+    case "summer":
+      return fallStartMondayLocal(Y);
+    case "fall":
+      return winterStartMondayLocal(Y + 1);
+  }
+}
+
+function nextSeasonKey(current: BookingCalendarSeason): BookingCalendarSeason {
+  switch (current) {
+    case "winter":
+      return "spring";
+    case "spring":
+      return "summer";
+    case "summer":
+      return "fall";
+    case "fall":
+      return "winter";
+  }
+}
+
+function seasonStartForClubYearOrNextWinter(
+  season: BookingCalendarSeason,
+  clubYear: number,
+): Date {
+  if (season === "winter") return winterStartMondayLocal(clubYear + 1);
+  return seasonStartMondayLocal(season, clubYear);
+}
+
+/**
+ * Season start Monday for a dropdown selection within a fixed club year
+ * (Winter is always Winter Y — the start of that club year).
+ */
+export function seasonStartMondayForClubYearDropdown(
+  season: BookingCalendarSeason,
+  clubYear: number,
+): Date {
+  return seasonStartMondayLocal(season, clubYear);
+}
+
+const FOUR_WEEKS_DAYS = 28;
+
+export type DefaultBookingSeasonResult = {
+  season: BookingCalendarSeason;
+  /** YYYY-MM-DD for the first Monday of that season instance. */
+  startMondayISO: string;
+  clubYear: number;
+};
+
+/**
+ * Default season and its first Monday, using:
+ * - “current” season from calendar intervals, then
+ * - if more than 28 days before the next season start → stay on current season;
+ *   otherwise → use the upcoming (next) season.
+ */
+export function defaultBookingSeasonAndStartMonday(
+  now: Date = new Date(),
+): DefaultBookingSeasonResult {
+  const today = startOfLocalCalendarDay(now);
+  const Y = bookingClubYearContainingDate(today);
+  const currentSeason = seasonContainingDateInClubYear(Y, today);
+  const nextStart = nextSeasonStartAfter(Y, currentSeason);
+  const daysUntilNext = calendarDaysFromTo(today, nextStart);
+
+  if (daysUntilNext > FOUR_WEEKS_DAYS) {
+    const d = seasonStartMondayLocal(currentSeason, Y);
+    return {
+      season: currentSeason,
+      startMondayISO: formatLocalISODate(d),
+      clubYear: bookingClubYearContainingDate(d),
+    };
+  }
+
+  const nextKey = nextSeasonKey(currentSeason);
+  const d = seasonStartForClubYearOrNextWinter(nextKey, Y);
+  return {
+    season: nextKey,
+    startMondayISO: formatLocalISODate(d),
+    clubYear: bookingClubYearContainingDate(d),
+  };
+}
+
+export function bookingCalendarSeasonLabel(s: BookingCalendarSeason): string {
+  switch (s) {
+    case "winter":
+      return "Winter";
+    case "spring":
+      return "Spring";
+    case "summer":
+      return "Summer";
+    case "fall":
+      return "Fall";
+  }
+}
