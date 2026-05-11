@@ -19,9 +19,9 @@ services:
       # Club Locker
       - CLUB_LOCKER_ADAPTER=mock
       - EMAIL_ADAPTER=gmail
-      - GMAIL_USER=cambridgeclubchamps@gmail.com
-      - GMAIL_APP_PASSWORD=qokd wadb vdyi edoa
-      - GMAIL_FROM_NAME=Martin Heath
+      - GMAIL_USER=${GMAIL_USER}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - GMAIL_FROM_NAME=${GMAIL_FROM_NAME}
       # AI
       - AI_AGENT=gemini
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -29,9 +29,8 @@ services:
       - US_SQUASH_MODE=${US_SQUASH_MODE:-live}
       - US_SQUASH_BEARER_TOKEN=${US_SQUASH_BEARER_TOKEN}
       - US_SQUASH_SESSION_COOKIE=${US_SQUASH_SESSION_COOKIE}
-      - US_SQUASH_CLUB_ID=${US_SQUASH_CLUB_ID}
-      - US_SQUASH_COURT_1_ID=${US_SQUASH_COURT_1_ID}
-      - US_SQUASH_COURT_2_ID=${US_SQUASH_COURT_2_ID}
+      - US_SQUASH_COURT_1_ID=${US_SQUASH_COURT_1_ID:-3510}
+      - US_SQUASH_COURT_2_ID=${US_SQUASH_COURT_2_ID:-3511}
       # Coolify will inject other vars like GEMINI_API_KEY, CLUB_LOCKER secrets, etc.
     volumes:
       - api_data:/app/data
