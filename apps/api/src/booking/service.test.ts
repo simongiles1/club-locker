@@ -1,5 +1,65 @@
 import { describe, expect, it } from "vitest";
-import { reservationIdsForSeasonWeek } from "./service.js";
+import {
+  bulkCancelWeekLabelPart,
+  houseLeagueSeasonBulkClinicName,
+  inferBulkHoldShape,
+  reservationIdsForSeasonWeek,
+} from "./service.js";
+
+describe("houseLeagueSeasonBulkClinicName", () => {
+  it("formats Summer House League Week 1", () => {
+    expect(houseLeagueSeasonBulkClinicName("Summer", 1)).toBe(
+      "Summer House League Week 1",
+    );
+  });
+  it("uses dynamic week number", () => {
+    expect(houseLeagueSeasonBulkClinicName("Winter", 8)).toBe(
+      "Winter House League Semis",
+    );
+  });
+});
+
+describe("bulkCancelWeekLabelPart", () => {
+  it("uses Semis for canonical semi-finals week", () => {
+    expect(bulkCancelWeekLabelPart(8)).toBe("Semis");
+  });
+  it("uses Week n for other weeks", () => {
+    expect(bulkCancelWeekLabelPart(1)).toBe("Week 1");
+    expect(bulkCancelWeekLabelPart(7)).toBe("Week 7");
+  });
+});
+
+describe("inferBulkHoldShape", () => {
+  const mon16 = Array.from({ length: 16 }, (_, i) => `m-${i}`);
+  const tue16 = Array.from({ length: 16 }, (_, i) => `t-${i}`);
+
+  it("with declared 8 weeks, 16 ids per weekday is compact weekly (two ids × 8 weeks), not one full week", () => {
+    expect(inferBulkHoldShape(mon16, tue16, 8)).toEqual({
+      kind: "compact_weekly",
+      weeks: 8,
+    });
+  });
+
+  it("with declared 1 week, 16 ids per weekday stays full layout", () => {
+    expect(inferBulkHoldShape(mon16, tue16, 1)).toEqual({
+      kind: "full",
+      weeks: 1,
+    });
+  });
+
+  it("without declared weeks, preserves legacy heuristic (16 ids → full 1)", () => {
+    expect(inferBulkHoldShape(mon16, tue16)).toEqual({
+      kind: "full",
+      weeks: 1,
+    });
+  });
+
+  it("pairs of length two are always compact_series", () => {
+    expect(inferBulkHoldShape(["a", "b"], ["c", "d"], 8)).toEqual({
+      kind: "compact_series",
+    });
+  });
+});
 
 describe("reservationIdsForSeasonWeek", () => {
   it("slices 32 ids for week 1 of an 8-week season (16+16 per week)", () => {

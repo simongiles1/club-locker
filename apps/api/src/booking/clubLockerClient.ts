@@ -72,6 +72,29 @@ export function extractReservationIdsFromClinicResponse(data: unknown): string[]
   return [];
 }
 
+/** Single match reservation `POST /clubs/.../reservations` — normalize id from response body. */
+export function extractReservationIdFromMatchResponse(
+  data: unknown,
+): string | null {
+  if (data == null) return null;
+  if (typeof data === "object" && data !== null) {
+    const o = data as Json;
+    if (typeof o.id === "number" || typeof o.id === "string") {
+      return String(o.id);
+    }
+    if (typeof o.reservationId === "number" || typeof o.reservationId === "string") {
+      return String(o.reservationId);
+    }
+    if (o.reservation != null && typeof o.reservation === "object") {
+      const r = o.reservation as { id?: unknown };
+      if (typeof r.id === "number" || typeof r.id === "string") {
+        return String(r.id);
+      }
+    }
+  }
+  return null;
+}
+
 function authHeaders(
   config: AppConfig,
 ): { Authorization: string; "content-type": string } {

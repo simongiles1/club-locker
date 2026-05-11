@@ -58,11 +58,20 @@ function extractCreateMatchError(data: unknown): string | null {
   return null;
 }
 
+export type RunSingleCourtMatchBookingResult = {
+  ok: boolean;
+  status: number;
+  data: unknown;
+  message: string;
+  /** Body posted to Club Locker `POST .../clubs/:id/reservations` (minus auth headers). */
+  outboundClubLockerBody: CreateMatchReservationBody;
+};
+
 export async function runSingleCourtMatchBooking(
   config: AppConfig,
   input: SingleCourtMatchInput,
   client: UssquashClient = createUssquashClient(config),
-): Promise<{ ok: boolean; status: number; data: unknown; message: string }> {
+): Promise<RunSingleCourtMatchBookingResult> {
   const courtId =
     input.courtSide === "stadium"
       ? config.US_SQUASH_COURT_1_ID
@@ -99,6 +108,7 @@ export async function runSingleCourtMatchBooking(
     ok,
     status: r.status,
     data: r.data,
+    outboundClubLockerBody: body,
     message: ok
       ? "Match reservation created in Club Locker."
       : apiErr ??

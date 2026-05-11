@@ -7,10 +7,12 @@ import {
   bookingRuns,
   players,
   seasonBookingHolds,
+  seasons,
   weekPlans,
 } from "../db/schema.js";
 import {
   createUssquashClient,
+  extractReservationIdFromMatchResponse,
   extractReservationIdsFromClinicResponse,
   type CreateClinicBody,
   type UssquashClient,
@@ -19,6 +21,7 @@ import { buildManagedMatchReservations, type WeekPlanPayload } from "./payloads.
 import {
   BULK_MONDAY_TIME_WINDOWS,
   BULK_TUESDAY_TIME_WINDOWS,
+  bulkHoldSlotsForWeekday,
   seasonWeekPlayDates,
 } from "@squash/shared";
 import {
@@ -32,6 +35,17 @@ type SeasonHoldRow = InferSelectModel<typeof seasonBookingHolds>;
 type WeekHoldRow = InferSelectModel<typeof bookingHolds>;
 
 const SLOTS_PER_PLAY_DAY = 8 * 2; // slot labels × two courts (matches allBulkSlotsForSingleDay)
+
+/**
+ * Canonical play week number for semi-finals (seven regular-season weeks precede).
+ * Matches `REGULAR_SEASON_WEEKS_IN_CALENDAR + 1` on the booking calendar (apps/web).
+ */
+const HOUSE_LEAGUE_SEMIS_WEEK_NUMBER = 8;
+
+/** User-facing fragment for Cancel bookings (e.g. "Semis" vs "Week 3"). */
+export function bulkCancelWeekLabelPart(week: number): string {
+  return week === HOUSE_LEAGUE_SEMIS_WEEK_NUMBER ? "Semis" : `Week ${week}`;
+}
 
 function extractUssquashErrorString(data: unknown): string | null {
   if (data == null) return null;
@@ -133,9 +147,33 @@ function weekdayLabel(iso: string): string {
   return names[parseISODateLocal(iso).getDay()] ?? "Day";
 }
 
-function seasonClinicName(day: "mon" | "tue", courtId: number, weekNumber: number): string {
-  const dayLabel = day === "mon" ? "Mon" : "Tue";
-  return `League block ${dayLabel} court ${courtId} (season) Week ${weekNumber}`;
+/**
+ * Club Locker `clinics` name for season bulk holds: "{Summer} House League Week {n}",
+ * or "{Summer} House League Semis" for the canonical semi-finals week.
+ * Season word comes from `calendar_segment` when set; otherwise first token of the DB season name.
+ */
+export function houseLeagueSeasonBulkClinicName(
+  seasonPrefix: string,
+  weekNumber: number,
+): string {
+  const p = seasonPrefix.trim() || "Season";
+  if (weekNumber === HOUSE_LEAGUE_SEMIS_WEEK_NUMBER) {
+    return `${p} House League Semis`;
+  }
+  return `${p} House League Week ${weekNumber}`;
+}
+
+function seasonPrefixForBulkClinicName(
+  calendarSegment: string | null | undefined,
+  seasonName: string | undefined,
+): string {
+  const seg = calendarSegment?.trim().toLowerCase();
+  if (seg === "winter" || seg === "spring" || seg === "summer" || seg === "fall") {
+    return seg.charAt(0).toUpperCase() + seg.slice(1);
+  }
+  const first = seasonName?.trim().split(/\s+/)[0];
+  if (first) return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+  return "Season";
 }
 
 /** First Monday in `week` (1 = week of start Monday = startMonday) */
@@ -388,6 +426,12 @@ export async function runSeasonBulkBooking(
     };
   }
 
+  const seasonRow = db.select().from(seasons).where(eq(seasons.id, input.seasonId)).get();
+  const clinicSeasonPrefix = seasonPrefixForBulkClinicName(
+    seasonRow?.calendarSegment ?? undefined,
+    seasonRow?.name,
+  );
+
   const exists = db
     .select()
     .from(seasonBookingHolds)
@@ -456,26 +500,27 @@ export async function runSeasonBulkBooking(
     const tueC1 = singleCourtSlotsForDay(dates.secondPlayDate, "tue", court1);
     const tueC2 = singleCourtSlotsForDay(dates.secondPlayDate, "tue", court2);
 
+    const weekClinicName = houseLeagueSeasonBulkClinicName(clinicSeasonPrefix, week);
     const bodyMon1 = makeSeasonClinicBody(
-      seasonClinicName("mon", court1, week),
+      weekClinicName,
       dates.firstPlayDate,
       monC1,
       1,
     );
     const bodyMon2 = makeSeasonClinicBody(
-      seasonClinicName("mon", court2, week),
+      weekClinicName,
       dates.firstPlayDate,
       monC2,
       1,
     );
     const bodyTue1 = makeSeasonClinicBody(
-      seasonClinicName("tue", court1, week),
+      weekClinicName,
       dates.secondPlayDate,
       tueC1,
       1,
     );
     const bodyTue2 = makeSeasonClinicBody(
-      seasonClinicName("tue", court2, week),
+      weekClinicName,
       dates.secondPlayDate,
       tueC2,
       1,
@@ -818,7 +863,7 @@ export type ConvertResult = {
   summary: {
     holdKind: "season" | "week";
     deleted: { id: string; status: number; ok: boolean }[];
-    created: { key: string; status: number; ok: boolean }[];
+    created: { key: string; status: number; ok: boolean; reservationId?: string }[];
     holdId: string;
   };
   message: string;
@@ -1125,14 +1170,28 @@ export async function runWeeklyConvert(
     // Same as before: may proceed if createMatchReservation without deletes (live shape).
   }
 
-  const created: { key: string; status: number; ok: boolean }[] = [];
+  const created: {
+    key: string;
+    status: number;
+    ok: boolean;
+    reservationId?: string;
+  }[] = [];
   for (const it of items) {
     const key = `b${it.boxNumber}-${it.playDate}-c${it.courtId}-${it.slot}`;
     const r = await client.createMatchReservation(
       config.US_SQUASH_CLUB_ID,
       it.body,
     );
-    created.push({ key, status: r.status, ok: r.status >= 200 && r.status < 300 });
+    const reservationId =
+      r.status >= 200 && r.status < 300
+        ? extractReservationIdFromMatchResponse(r.data) ?? undefined
+        : undefined;
+    created.push({
+      key,
+      status: r.status,
+      ok: r.status >= 200 && r.status < 300,
+      reservationId,
+    });
   }
 
   const allOk = created.every((c) => c.ok);
@@ -1178,6 +1237,738 @@ export async function runWeeklyConvert(
       : "Some match reservations failed — see summary.",
     summary: { holdKind, deleted, created, holdId: holdRefId },
   };
+}
+
+export type CancellableCalendarRow = {
+  rowId: string;
+  kind: "bulk" | "match";
+  week: number;
+  date: string;
+  begin: string;
+  end: string;
+  label: string;
+  /** Club Locker reservation ids to DELETE for this row (Stadium + Center). */
+  reservationIds: string[];
+  /** False when ids are missing (e.g. old convert run without stored ids). */
+  complete: boolean;
+};
+
+function playDayKindForDate(
+  weekDates: { firstPlayDate: string; secondPlayDate: string },
+  iso: string,
+): "mon" | "tue" | null {
+  if (iso === weekDates.firstPlayDate) return "mon";
+  if (iso === weekDates.secondPlayDate) return "tue";
+  return null;
+}
+
+/** First–last clock window for all bulk slots on that league weekday. */
+function bulkHoldDaySpan(day: "mon" | "tue"): { begin: string; end: string } {
+  const slots = bulkHoldSlotsForWeekday(day);
+  const first = slots[0];
+  const last = slots[slots.length - 1];
+  if (!first || !last) return { begin: "00:00", end: "23:59" };
+  return { begin: first.begin, end: last.end };
+}
+
+function isFullBulkDaySpan(
+  day: "mon" | "tue",
+  begin: string,
+  end: string,
+): boolean {
+  const span = bulkHoldDaySpan(day);
+  return span.begin === begin && span.end === end;
+}
+
+function normalizeReservationIdListJson(json: string): string[] {
+  try {
+    const raw = JSON.parse(json) as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((x) => String(x).trim())
+      .filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+type InferredBulkHoldShape =
+  | { kind: "full"; weeks: number }
+  | { kind: "compact_weekly"; weeks: number }
+  | { kind: "compact_series" }
+  | { kind: "unknown" };
+
+/**
+ * Derive how many bulk weeks are actually stored from JSON lengths.
+ * Declared `season_weeks` often disagrees (e.g. 8 vs 7 weeks actually booked).
+ *
+ * **Ambiguity**: live Club Locker bulk runs often store `seasonWeeks * 2` ids per weekday
+ * (one id per court per week). That length can equal exactly one `"full"` week of ids
+ * (16 = `SLOTS_PER_PLAY_DAY`). When {@link declaredSeasonWeeks} is known (from
+ * `season_booking_holds.season_weeks`), prefer resolving against it first.
+ */
+export function inferBulkHoldShape(
+  mon: string[],
+  tue: string[],
+  declaredSeasonWeeks?: number,
+): InferredBulkHoldShape {
+  if (mon.length !== tue.length || mon.length === 0) {
+    return { kind: "unknown" };
+  }
+  const n = mon.length;
+  /** One Stadium + one Center recurring clinic covering all occurrences on this weekday. */
+  if (n === 2) {
+    return { kind: "compact_series" };
+  }
+  const declaredOk =
+    typeof declaredSeasonWeeks === "number" &&
+    Number.isFinite(declaredSeasonWeeks) &&
+    declaredSeasonWeeks >= 1 &&
+    declaredSeasonWeeks <= 1000;
+
+  if (declaredOk) {
+    const asCompactWeekly = declaredSeasonWeeks * 2;
+    const asFull = declaredSeasonWeeks * SLOTS_PER_PLAY_DAY;
+    if (n === asCompactWeekly) {
+      return { kind: "compact_weekly", weeks: declaredSeasonWeeks };
+    }
+    if (n === asFull) {
+      return { kind: "full", weeks: declaredSeasonWeeks };
+    }
+  }
+
+  if (n % SLOTS_PER_PLAY_DAY === 0) {
+    return { kind: "full", weeks: n / SLOTS_PER_PLAY_DAY };
+  }
+  if (n % 2 === 0) {
+    return { kind: "compact_weekly", weeks: n / 2 };
+  }
+  return { kind: "unknown" };
+}
+
+function findSeasonHoldForStartMonday(
+  db: Db,
+  seasonId: string,
+  startMondayDate: string,
+): SeasonHoldRow | undefined {
+  const rows = db
+    .select()
+    .from(seasonBookingHolds)
+    .where(
+      and(
+        eq(seasonBookingHolds.seasonId, seasonId),
+        eq(seasonBookingHolds.startMondayDate, startMondayDate),
+      ),
+    )
+    .orderBy(desc(seasonBookingHolds.createdAt))
+    .all();
+  return rows.find((h) => h.status === "active" || h.status === "fully_converted");
+}
+
+/**
+ * All reservation ids Club Locker holds for one league play day (Mon or Tue) in one season week.
+ * - Full layout: 8 slots × 2 courts = 16 ids per day per week.
+ * - Compact weekly: 2 ids (Stadium + Center) per day per booked week.
+ * - Compact series: 2 ids total for that weekday (recurring series for the whole season block).
+ *
+ * When {@link courtSide} is set, only that court’s ids are returned (one id for compact layouts;
+ * all Stadium or all Center slot-ids for the day in the full layout).
+ */
+function getBulkDayReservationIds(
+  hold: SeasonHoldRow,
+  week: number,
+  playDate: string,
+  courtSide?: "stadium" | "center",
+): { ids: string[] } | { error: string } {
+  const mon = normalizeReservationIdListJson(hold.mondayReservationIdsJson);
+  const tue = normalizeReservationIdListJson(hold.tuesdayReservationIdsJson);
+  const shape = inferBulkHoldShape(mon, tue, hold.seasonWeeks);
+  const weekDates = seasonWeekPlayDates(hold.startMondayDate, week);
+  const day = playDayKindForDate(weekDates, playDate);
+  if (!day) {
+    return { error: "That date is not a play day for this league week." };
+  }
+  const arr = day === "mon" ? mon : tue;
+
+  const maxWeek =
+    shape.kind === "full" || shape.kind === "compact_weekly"
+      ? Math.min(shape.weeks, hold.seasonWeeks)
+      : hold.seasonWeeks;
+
+  if (week < 1 || week > maxWeek) {
+    return { error: "Week is outside this season block." };
+  }
+
+  if (shape.kind === "full") {
+    const off = (week - 1) * SLOTS_PER_PLAY_DAY;
+    const chunk = arr.slice(off, off + SLOTS_PER_PLAY_DAY);
+    if (chunk.length !== SLOTS_PER_PLAY_DAY) {
+      return { error: "Missing reservation ids for this day in the local hold." };
+    }
+    if (courtSide === "stadium") {
+      const ids = chunk.filter((_, i) => i % 2 === 0);
+      if (ids.length !== SLOTS_PER_PLAY_DAY / 2) {
+        return { error: "Missing Stadium reservation ids for this day in the local hold." };
+      }
+      return { ids };
+    }
+    if (courtSide === "center") {
+      const ids = chunk.filter((_, i) => i % 2 === 1);
+      if (ids.length !== SLOTS_PER_PLAY_DAY / 2) {
+        return { error: "Missing Center reservation ids for this day in the local hold." };
+      }
+      return { ids };
+    }
+    return { ids: chunk };
+  }
+
+  if (shape.kind === "compact_weekly") {
+    const off = (week - 1) * 2;
+    const stadiumId = arr[off];
+    const centerId = arr[off + 1];
+    if (!stadiumId || !centerId) {
+      return { error: "Missing reservation ids for this day in the local hold." };
+    }
+    if (courtSide === "stadium") return { ids: [stadiumId] };
+    if (courtSide === "center") return { ids: [centerId] };
+    return { ids: [stadiumId, centerId] };
+  }
+
+  if (shape.kind === "compact_series") {
+    const stadiumId = arr[0];
+    const centerId = arr[1];
+    if (!stadiumId || !centerId) {
+      return { error: "Missing reservation ids for this day in the local hold." };
+    }
+    if (courtSide === "stadium") return { ids: [stadiumId] };
+    if (courtSide === "center") return { ids: [centerId] };
+    return { ids: [stadiumId, centerId] };
+  }
+
+  /** Mismatched lengths or odd layout: try this weekday column only. */
+  const off = (week - 1) * 2;
+  if (off + 2 <= arr.length) {
+    const stadiumId = arr[off];
+    const centerId = arr[off + 1];
+    if (stadiumId && centerId) {
+      if (courtSide === "stadium") return { ids: [stadiumId] };
+      if (courtSide === "center") return { ids: [centerId] };
+      return { ids: [stadiumId, centerId] };
+    }
+  }
+
+  return {
+    error:
+      "This season hold uses a legacy reservation id layout. Cancel in Club Locker or remove the local hold.",
+  };
+}
+
+/**
+ * Interleaved bulk layout: for each slot, ids are [Stadium/court1, Center/court2]
+ * (see {@link mergeRecurringClinicInterleavedIds} when storing season bulk).
+ */
+function getBulkReservationIdsForSlotFromHold(
+  hold: SeasonHoldRow,
+  week: number,
+  playDate: string,
+  begin: string,
+  end: string,
+  courtSide?: "stadium" | "center",
+): { ids: string[] } | { error: string } {
+  const mon = normalizeReservationIdListJson(hold.mondayReservationIdsJson);
+  const tue = normalizeReservationIdListJson(hold.tuesdayReservationIdsJson);
+  const shape = inferBulkHoldShape(mon, tue, hold.seasonWeeks);
+  if (shape.kind !== "full") {
+    return {
+      error:
+        "Per-slot cancel needs the expanded (16 ids per weekday per week) hold layout. Right-click still cancels the whole play day for this week, or use the day rows in Cancel bookings.",
+    };
+  }
+  const expected = shape.weeks * SLOTS_PER_PLAY_DAY;
+  if (mon.length !== expected || tue.length !== expected) {
+    return {
+      error:
+        "Per-slot cancel needs the expanded (16 ids per weekday per week) hold layout. Right-click still cancels the whole play day for this week, or use the day rows in Cancel bookings.",
+    };
+  }
+  const maxWeek = Math.min(shape.weeks, hold.seasonWeeks);
+  if (week < 1 || week > maxWeek) {
+    return { error: "Week is outside this season block." };
+  }
+  const weekDates = seasonWeekPlayDates(hold.startMondayDate, week);
+  const day = playDayKindForDate(weekDates, playDate);
+  if (!day) {
+    return { error: "That date is not a play day for this league week." };
+  }
+  const daySlots = bulkHoldSlotsForWeekday(day);
+  const slotIdx = daySlots.findIndex((s) => s.begin === begin && s.end === end);
+  if (slotIdx < 0) {
+    return { error: "That time does not match a bulk league slot." };
+  }
+  const arr = day === "mon" ? mon : tue;
+  const offset = (week - 1) * SLOTS_PER_PLAY_DAY + slotIdx * 2;
+  const stadiumId = arr[offset];
+  const centerId = arr[offset + 1];
+  if (courtSide === "stadium") {
+    if (!stadiumId) {
+      return { error: "Missing reservation id for Stadium at this slot in the local hold." };
+    }
+    return { ids: [stadiumId] };
+  }
+  if (courtSide === "center") {
+    if (!centerId) {
+      return { error: "Missing reservation id for Center at this slot in the local hold." };
+    }
+    return { ids: [centerId] };
+  }
+  if (!stadiumId || !centerId) {
+    return { error: "Missing reservation ids for this slot in the local hold." };
+  }
+  return { ids: [stadiumId, centerId] };
+}
+
+function resolveBulkReservationIdsForCancel(
+  hold: SeasonHoldRow,
+  week: number,
+  date: string,
+  begin: string,
+  end: string,
+  courtSide?: "stadium" | "center",
+): { ids: string[] } | { error: string } {
+  const mon = normalizeReservationIdListJson(hold.mondayReservationIdsJson);
+  const tue = normalizeReservationIdListJson(hold.tuesdayReservationIdsJson);
+  const shape = inferBulkHoldShape(mon, tue, hold.seasonWeeks);
+  const weekDates = seasonWeekPlayDates(hold.startMondayDate, week);
+  const day = playDayKindForDate(weekDates, date);
+  if (!day) {
+    return { error: "That date is not a play day for this league week." };
+  }
+
+  if (shape.kind === "full") {
+    if (isFullBulkDaySpan(day, begin, end)) {
+      return getBulkDayReservationIds(hold, week, date, courtSide);
+    }
+    const slot = getBulkReservationIdsForSlotFromHold(
+      hold,
+      week,
+      date,
+      begin,
+      end,
+      courtSide,
+    );
+    if ("error" in slot) return slot;
+    return { ids: [...slot.ids] };
+  }
+
+  /**
+   * Compact layouts store one Stadium + one Center reservation per play day (or one recurring
+   * series per weekday). There is no per-slot id — "replace green bulk" cancels the whole court
+   * block for that day (test workflow), then books a single match.
+   */
+  if (shape.kind === "compact_weekly" || shape.kind === "compact_series") {
+    return getBulkDayReservationIds(hold, week, date, courtSide);
+  }
+
+  return getBulkDayReservationIds(hold, week, date, courtSide);
+}
+
+function stripReservationIdsFromSeasonHold(
+  db: Db,
+  holdId: string,
+  idsToRemove: Set<string>,
+): void {
+  const h = db
+    .select()
+    .from(seasonBookingHolds)
+    .where(eq(seasonBookingHolds.id, holdId))
+    .get();
+  if (!h) return;
+  const mon = JSON.parse(h.mondayReservationIdsJson) as string[];
+  const tue = JSON.parse(h.tuesdayReservationIdsJson) as string[];
+  const mon2 = mon.filter((id) => !idsToRemove.has(id));
+  const tue2 = tue.filter((id) => !idsToRemove.has(id));
+  if (mon2.length === mon.length && tue2.length === tue.length) return;
+  const bulkIdsGone = mon2.length === 0 && tue2.length === 0;
+  db.update(seasonBookingHolds)
+    .set({
+      mondayReservationIdsJson: JSON.stringify(mon2),
+      tuesdayReservationIdsJson: JSON.stringify(tue2),
+      ...(bulkIdsGone ? { status: "cancelled" as const } : {}),
+    })
+    .where(eq(seasonBookingHolds.id, holdId))
+    .run();
+}
+
+function latestConvertRunForWeek(
+  db: Db,
+  seasonId: string,
+  week: number,
+): { created: { key: string; ok: boolean; reservationId?: string }[] } | null {
+  const row = db
+    .select()
+    .from(bookingRuns)
+    .where(
+      and(
+        eq(bookingRuns.seasonId, seasonId),
+        eq(bookingRuns.kind, "convert"),
+        eq(bookingRuns.weekNumber, week),
+      ),
+    )
+    .orderBy(desc(bookingRuns.createdAt))
+    .limit(1)
+    .get();
+  if (!row || row.status === "error") return null;
+  try {
+    const s = JSON.parse(row.summaryJson) as {
+      created?: { key: string; ok: boolean; reservationId?: string }[];
+    };
+    return { created: s.created ?? [] };
+  } catch {
+    return null;
+  }
+}
+
+function previewItemReservationKey(item: {
+  box: number;
+  date: string;
+  courtId: string;
+  slot: string;
+}): string {
+  return `b${item.box}-${item.date}-c${item.courtId}-${item.slot}`;
+}
+
+export function getMatchReservationIdsForCalendarSlot(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    startMondayDate: string;
+    week: number;
+    date: string;
+    begin: string;
+    end: string;
+  },
+): { ids: string[] } | { error: string } {
+  const dates = seasonWeekPlayDates(input.startMondayDate, input.week);
+  if (input.date !== dates.firstPlayDate && input.date !== dates.secondPlayDate) {
+    return { error: "That date is not a play day for this league week." };
+  }
+  const preview = previewBooking(
+    db,
+    config,
+    input.seasonId,
+    input.week,
+    dates.firstPlayDate,
+    dates.secondPlayDate,
+  );
+  if ("error" in preview) {
+    return { error: preview.error === "week_plan_missing" ? "Week plan not found." : preview.error };
+  }
+  const conv = latestConvertRunForWeek(db, input.seasonId, input.week);
+  if (!conv) {
+    return { error: "No conversion run found for this week (reservation ids unknown)." };
+  }
+  const slotStr = `${input.begin}-${input.end}`;
+  const itemsForSlot = preview.items.filter(
+    (it) => it.date === input.date && it.slot === slotStr,
+  );
+  if (itemsForSlot.length === 0) {
+    return { error: "No converted match reservations mapped to this slot." };
+  }
+  const idByKey = new Map<string, string>();
+  for (const c of conv.created) {
+    if (c.ok && c.reservationId) idByKey.set(c.key, c.reservationId);
+  }
+  const ids: string[] = [];
+  for (const it of itemsForSlot) {
+    const id = idByKey.get(previewItemReservationKey(it));
+    if (id) ids.push(id);
+  }
+  if (ids.length === 0) {
+    return {
+      error:
+        "Reservation ids were not stored for this week (convert again, or cancel in Club Locker).",
+    };
+  }
+  return { ids };
+}
+
+function twoPlayerVsFromNames(players: string[]): string | null {
+  const [a, b] = players;
+  if (!a || !b) return null;
+  return `${a} v ${b}`;
+}
+
+function listMatchCancellableRowsForWeek(
+  db: Db,
+  config: AppConfig,
+  seasonId: string,
+  startMondayDate: string,
+  week: number,
+): CancellableCalendarRow[] {
+  const dates = seasonWeekPlayDates(startMondayDate, week);
+  const preview = previewBooking(
+    db,
+    config,
+    seasonId,
+    week,
+    dates.firstPlayDate,
+    dates.secondPlayDate,
+  );
+  if ("error" in preview) return [];
+
+  const conv = latestConvertRunForWeek(db, seasonId, week);
+  const idByKey = new Map<string, string>();
+  if (conv) {
+    for (const c of conv.created) {
+      if (c.ok && c.reservationId) idByKey.set(c.key, c.reservationId);
+    }
+  }
+
+  const rows: CancellableCalendarRow[] = [];
+  const bySlot = new Map<
+    string,
+    { date: string; slot: string; items: typeof preview.items }
+  >();
+  for (const it of preview.items) {
+    const k = `${it.date}|${it.slot}`;
+    let g = bySlot.get(k);
+    if (!g) {
+      g = { date: it.date, slot: it.slot, items: [] };
+      bySlot.set(k, g);
+    }
+    g.items.push(it);
+  }
+
+  for (const g of bySlot.values()) {
+    const parts = g.slot.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
+    const begin = parts?.[1] ?? "";
+    const end = parts?.[2] ?? "";
+    const reservationIds: string[] = [];
+    for (const it of g.items) {
+      const id = idByKey.get(previewItemReservationKey(it));
+      if (id) reservationIds.push(id);
+    }
+    const vs = [...new Set(g.items.map((i) => twoPlayerVsFromNames(i.players)))].filter(
+      Boolean,
+    );
+    const slotNote = begin && end ? `${begin}–${end}` : g.slot;
+    rows.push({
+      rowId: `match-${week}-${g.date}-${g.slot}`,
+      kind: "match",
+      week,
+      date: g.date,
+      begin,
+      end,
+      label: `Match · ${bulkCancelWeekLabelPart(week)} · ${g.date} · ${slotNote}${vs.length ? ` · ${vs.join(" · ")}` : ""}`,
+      reservationIds,
+      complete: reservationIds.length === g.items.length && g.items.length > 0,
+    });
+  }
+
+  return rows;
+}
+
+/**
+ * All cancellable rows for this season hold (every booked week: two play days per bulk week,
+ * or match rows for converted weeks).
+ */
+export function listAllCancellableBookings(
+  db: Db,
+  config: AppConfig,
+  seasonId: string,
+  startMondayDate: string,
+): CancellableCalendarRow[] {
+  const hold = findSeasonHoldForStartMonday(db, seasonId, startMondayDate);
+  if (!hold) return [];
+
+  const converted = JSON.parse(hold.convertedWeeksJson) as number[];
+  const rows: CancellableCalendarRow[] = [];
+  const mon = normalizeReservationIdListJson(hold.mondayReservationIdsJson);
+  const tue = normalizeReservationIdListJson(hold.tuesdayReservationIdsJson);
+
+  /** No Mon/Tue bulk ids left — avoid showing every week as "incomplete" after a full cancel. */
+  if (hold.status === "active" && mon.length === 0 && tue.length === 0) {
+    for (let week = 1; week <= hold.seasonWeeks; week++) {
+      if (converted.includes(week)) {
+        rows.push(
+          ...listMatchCancellableRowsForWeek(db, config, seasonId, startMondayDate, week),
+        );
+      }
+    }
+    return rows;
+  }
+
+  const shape = inferBulkHoldShape(mon, tue, hold.seasonWeeks);
+  const bulkWeekCap =
+    shape.kind === "full" || shape.kind === "compact_weekly"
+      ? Math.min(shape.weeks, hold.seasonWeeks)
+      : hold.seasonWeeks;
+
+  for (let week = 1; week <= hold.seasonWeeks; week++) {
+    if (converted.includes(week)) {
+      rows.push(
+        ...listMatchCancellableRowsForWeek(db, config, seasonId, startMondayDate, week),
+      );
+    } else if (hold.status === "active") {
+      if (
+        (shape.kind === "full" || shape.kind === "compact_weekly") &&
+        week > bulkWeekCap
+      ) {
+        continue;
+      }
+      const dates = seasonWeekPlayDates(startMondayDate, week);
+      for (const day of ["mon", "tue"] as const) {
+        const iso = day === "mon" ? dates.firstPlayDate : dates.secondPlayDate;
+        const span = bulkHoldDaySpan(day);
+        const resolved = getBulkDayReservationIds(hold, week, iso);
+        const complete = !("error" in resolved);
+        const ids = complete ? resolved.ids : [];
+        rows.push({
+          rowId: `bulk-${week}-${iso}-day`,
+          kind: "bulk",
+          week,
+          date: iso,
+          begin: span.begin,
+          end: span.end,
+          label: `Bulk hold · ${bulkCancelWeekLabelPart(week)} · ${iso} · ${day === "mon" ? "Monday" : "Tuesday"} · all slots (both courts)`,
+          reservationIds: ids,
+          complete,
+        });
+      }
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Rows the booking calendar can cancel for one season week (subset of {@link listAllCancellableBookings}).
+ */
+export function listCancellableBookingsForWeek(
+  db: Db,
+  config: AppConfig,
+  seasonId: string,
+  startMondayDate: string,
+  week: number,
+): CancellableCalendarRow[] {
+  return listAllCancellableBookings(db, config, seasonId, startMondayDate).filter(
+    (r) => r.week === week,
+  );
+}
+
+export type CancelCalendarItem =
+  | {
+      kind: "bulk";
+      week: number;
+      date: string;
+      begin: string;
+      end: string;
+      /** When set (full layout only), only that court’s bulk clinic id is cancelled for the slot. */
+      courtSide?: "stadium" | "center";
+    }
+  | { kind: "match"; week: number; date: string; begin: string; end: string };
+
+function calendarCancelDedupeKey(it: CancelCalendarItem): string {
+  const court =
+    it.kind === "bulk" && it.courtSide != null ? `:${it.courtSide}` : "";
+  return `${it.kind}:${it.week}:${it.date}:${it.begin}:${it.end}${court}`;
+}
+
+/**
+ * Delete Club Locker reservations for calendar picks and drop their ids from the local season hold.
+ */
+export async function cancelBookingCalendarItems(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    startMondayDate: string;
+    notifyUsers: boolean;
+    items: CancelCalendarItem[];
+  },
+  client: UssquashClient = createUssquashClient(config),
+): Promise<
+  | {
+      ok: true;
+      deleted: { id: string; status: number; ok: boolean }[];
+      message: string;
+    }
+  | { ok: false; error: string }
+> {
+  const hold = findSeasonHoldForStartMonday(db, input.seasonId, input.startMondayDate);
+  if (!hold) {
+    return { ok: false, error: "No season hold found for this start Monday." };
+  }
+
+  const seen = new Set<string>();
+  const unique: CancelCalendarItem[] = [];
+  for (const it of input.items) {
+    const k = calendarCancelDedupeKey(it);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    unique.push(it);
+  }
+
+  const toDelete: string[] = [];
+  for (const item of unique) {
+    if (item.kind === "bulk") {
+      const r = resolveBulkReservationIdsForCancel(
+        hold,
+        item.week,
+        item.date,
+        item.begin,
+        item.end,
+        item.courtSide,
+      );
+      if ("error" in r) return { ok: false, error: r.error };
+      toDelete.push(...r.ids);
+    } else {
+      const r = getMatchReservationIdsForCalendarSlot(db, config, {
+        seasonId: input.seasonId,
+        startMondayDate: input.startMondayDate,
+        week: item.week,
+        date: item.date,
+        begin: item.begin,
+        end: item.end,
+      });
+      if ("error" in r) return { ok: false, error: r.error };
+      toDelete.push(...r.ids);
+    }
+  }
+
+  const uniqueIds = [...new Set(toDelete)];
+  if (uniqueIds.length === 0) {
+    return { ok: false, error: "Nothing to cancel." };
+  }
+
+  const deleted: { id: string; status: number; ok: boolean }[] = [];
+  for (const id of uniqueIds) {
+    const d = await client.deleteReservation(id, input.notifyUsers);
+    deleted.push({ id, status: d.status, ok: d.status >= 200 && d.status < 300 });
+  }
+
+  const okIds = new Set(
+    deleted.filter((x) => x.ok).map((x) => x.id),
+  );
+  if (okIds.size > 0) {
+    stripReservationIdsFromSeasonHold(db, hold.id, okIds);
+  }
+
+  const okCount = deleted.filter((x) => x.ok).length;
+  if (okCount === 0) {
+    return {
+      ok: false,
+      error: "Club Locker did not delete any reservations (check ids / credentials).",
+    };
+  }
+
+  const message =
+    okCount === deleted.length
+      ? `Cancelled ${okCount} reservation(s) in Club Locker and updated the local season hold.`
+      : `${okCount} of ${deleted.length} reservation delete(s) succeeded; check Club Locker for failures.`;
+
+  return { ok: true, deleted, message };
 }
 
 export function listBookingHolds(

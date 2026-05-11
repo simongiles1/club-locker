@@ -16,6 +16,7 @@ import {
   type ChampionshipDivision,
 } from "@squash/shared";
 import { api } from "./api.js";
+import { EmailsPage } from "./EmailsPage.js";
 import type { ClubMember } from "./MembersPage.js";
 import {
   MemberSearchSelect,
@@ -169,9 +170,9 @@ export function ChampionshipsPage({
   const [clubMembers, setClubMembers] = useState<ClubMember[]>([]);
   const [membersLoading, setMembersLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [pageTab, setPageTab] = useState<"divisions" | "schedule">(
-    "divisions",
-  );
+  const [pageTab, setPageTab] = useState<
+    "divisions" | "schedule" | "emails"
+  >("divisions");
 
   const refreshRosterPlayers = useCallback(async () => {
     const rows = await api<PlayerRow[]>("/api/players");
@@ -477,38 +478,125 @@ export function ChampionshipsPage({
   }
 
   return (
-    <div>
-      <h1>Club Championships</h1>
-      <p className="champ-help">
-        Manage draws by division under <strong>Divisions</strong>, or open{" "}
-        <strong>Round schedule</strong> to set playoff round due dates once for the
-        year (shared by every bracket).
+    <div className="championships-page">
+      <h1 className="championships-page-title">Club Championships</h1>
+      <p className="champ-help champ-help--page">
+        {pageTab === "emails" ? (
+          <>
+            Draft and test club messages from the shared email outbox; use{" "}
+            <strong>Divisions</strong> or <strong>Round schedule</strong> for bracket
+            setup and due dates.
+          </>
+        ) : (
+          <>
+            Manage draws by division under <strong>Divisions</strong>, or open{" "}
+            <strong>Round schedule</strong> to set playoff round due dates once for the
+            year (shared by every bracket).
+          </>
+        )}
       </p>
 
-      <div className="champ-page-tabs" role="tablist" aria-label="Championship sections">
-        <button
-          type="button"
-          role="tab"
-          id="tab-divisions"
-          aria-selected={pageTab === "divisions"}
-          aria-controls="panel-divisions"
-          className={pageTab === "divisions" ? "is-active" : ""}
-          onClick={() => setPageTab("divisions")}
-        >
-          Divisions
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id="tab-schedule"
-          aria-selected={pageTab === "schedule"}
-          aria-controls="panel-schedule"
-          className={pageTab === "schedule" ? "is-active" : ""}
-          onClick={() => setPageTab("schedule")}
-        >
-          Round schedule
-        </button>
+      <div className="champ-page-toolbar">
+        <div className="champ-page-toolbar-tabs">
+          <div
+            className="champ-page-tabs"
+            role="tablist"
+            aria-label="Championship sections"
+          >
+            <button
+              type="button"
+              role="tab"
+              id="tab-divisions"
+              aria-selected={pageTab === "divisions"}
+              aria-controls="panel-divisions"
+              className={pageTab === "divisions" ? "is-active" : ""}
+              onClick={() => setPageTab("divisions")}
+            >
+              Divisions
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-schedule"
+              aria-selected={pageTab === "schedule"}
+              aria-controls="panel-schedule"
+              className={pageTab === "schedule" ? "is-active" : ""}
+              onClick={() => setPageTab("schedule")}
+            >
+              Round schedule
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-emails"
+              aria-selected={pageTab === "emails"}
+              aria-controls="panel-emails"
+              className={pageTab === "emails" ? "is-active" : ""}
+              onClick={() => setPageTab("emails")}
+            >
+              Emails
+            </button>
+          </div>
+        </div>
+        {pageTab === "divisions" ? (
+          <div className="champ-toolbar-actions">
+            <div className="champ-division-field">
+              <label className="champ-division-label">
+                Division{" "}
+                <select
+                  className="champ-division-select"
+                  value={selectedCode}
+                  onChange={(e) => setSelectedCode(e.target.value)}
+                  aria-describedby="champ-division-legend"
+                >
+                  {divisions.map((d) => {
+                    const code = divisionCode(d);
+                    const created = divisionCodesCreatedForSeason.has(code);
+                    return (
+                      <option key={code} value={code}>
+                        {divisionDisplayName(d)}
+                        {created ? " ✓" : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+              <p id="champ-division-legend" className="champ-division-legend">
+                ✓ = a championship exists for this year (division created).
+              </p>
+            </div>
+            {!championshipForSelection && selectedDivision ? (
+              <button
+                type="button"
+                className="primary"
+                disabled={busy}
+                onClick={ensureChampionshipExists}
+              >
+                Create division for this year
+              </button>
+            ) : null}
+            {championshipForSelection ? (
+              <span
+                className={`champ-badge champ-badge--${detail?.championship.status ?? championshipForSelection.status}`}
+              >
+                {(
+                  detail?.championship.status ?? championshipForSelection.status
+                ).toUpperCase()}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
+
+      {pageTab === "emails" ? (
+        <div
+          id="panel-emails"
+          role="tabpanel"
+          aria-labelledby="tab-emails"
+        >
+          <EmailsPage onLog={show} />
+        </div>
+      ) : null}
 
       {pageTab === "schedule" ? (
         <div
@@ -531,89 +619,46 @@ export function ChampionshipsPage({
         id="panel-divisions"
         role="tabpanel"
         aria-labelledby="tab-divisions"
-        className="card row"
         hidden={pageTab !== "divisions"}
-        style={{ alignItems: "flex-end" }}
       >
-        <div className="champ-division-field">
-          <label className="champ-division-label">
-            Division{" "}
-            <select
-              className="champ-division-select"
-              value={selectedCode}
-              onChange={(e) => setSelectedCode(e.target.value)}
-              aria-describedby="champ-division-legend"
-            >
-              {divisions.map((d) => {
-                const code = divisionCode(d);
-                const created = divisionCodesCreatedForSeason.has(code);
-                return (
-                  <option key={code} value={code}>
-                    {divisionDisplayName(d)}
-                    {created ? " ✓" : ""}
-                  </option>
-                );
-              })}
-            </select>
-          </label>
-          <p id="champ-division-legend" className="champ-division-legend">
-            ✓ = a championship exists for this year (division created).
-          </p>
-        </div>
-        {!championshipForSelection && selectedDivision ? (
-          <button
-            type="button"
-            className="primary"
-            disabled={busy}
-            onClick={ensureChampionshipExists}
-          >
-            Create division for this year
-          </button>
+        {detail && pageTab === "divisions" ? (
+          <>
+            <RosterCard
+              detail={detail}
+              clubMembers={clubMembers}
+              rosterPlayers={rosterPlayers}
+              membersLoading={membersLoading}
+              busy={busy}
+              onAdd={handleAddEntry}
+              onRemove={handleRemoveEntry}
+              onUpdateSeed={handleUpdateSeed}
+              onGenerate={handleGenerateDraw}
+            />
+            {detail.activeDraw ? (
+              <BracketCard
+                detail={detail}
+                rosterPlayers={rosterPlayers}
+                clubMembers={clubMembers}
+                membersLoading={membersLoading}
+                onEnsuredTestEmailPlayer={refreshRosterPlayers}
+                busy={busy}
+                notifySuccess={show}
+                notifyError={error}
+                onPublish={handlePublishDraw}
+                onStageEmails={handleStageEmails}
+                onUpdateMatch={handleUpdateMatch}
+              />
+            ) : null}
+          </>
         ) : null}
-        {championshipForSelection ? (
-          <span className={`champ-badge champ-badge--${detail?.championship.status ?? championshipForSelection.status}`}>
-            {(detail?.championship.status ?? championshipForSelection.status).toUpperCase()}
-          </span>
+        {!detail && selectedDivision && pageTab === "divisions" ? (
+          <div className="card champ-empty">
+            No division yet for this year. Click{" "}
+            <strong>Create division for this year</strong> in the bar above to
+            start enrolling players.
+          </div>
         ) : null}
       </div>
-
-      {detail && pageTab === "divisions" ? (
-        <>
-          <RosterCard
-            detail={detail}
-            clubMembers={clubMembers}
-            rosterPlayers={rosterPlayers}
-            membersLoading={membersLoading}
-            busy={busy}
-            onAdd={handleAddEntry}
-            onRemove={handleRemoveEntry}
-            onUpdateSeed={handleUpdateSeed}
-            onGenerate={handleGenerateDraw}
-          />
-          {detail.activeDraw ? (
-            <BracketCard
-              detail={detail}
-              rosterPlayers={rosterPlayers}
-              clubMembers={clubMembers}
-              membersLoading={membersLoading}
-              onEnsuredTestEmailPlayer={refreshRosterPlayers}
-              busy={busy}
-              notifySuccess={show}
-              notifyError={error}
-              onPublish={handlePublishDraw}
-              onStageEmails={handleStageEmails}
-              onUpdateMatch={handleUpdateMatch}
-            />
-          ) : null}
-        </>
-      ) : null}
-      {!detail && selectedDivision && pageTab === "divisions" ? (
-        <div className="card champ-empty">
-          No division yet for this year. Click{" "}
-          <strong>Create division for this year</strong> above to start
-          enrolling players.
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1287,8 +1332,9 @@ function BracketCard({
       ) : null}
       <p className="champ-help-small">
         “Stage match emails” adds a draft email per match in the selected round to
-        the Email outbox (dates come from the{" "}
-        <strong>Round schedule</strong> tab). Approve and send from there.
+        the email outbox (dates come from the{" "}
+        <strong>Round schedule</strong> tab). Approve and send from the{" "}
+        <strong>Emails</strong> tab.
       </p>
     </div>
   );
@@ -1733,7 +1779,7 @@ function TestEmailModal({
             >
               <option value="">
                 {emailTemplates.length === 0
-                  ? "— No templates (create under Emails) —"
+                  ? "— No templates (use the Emails tab) —"
                   : "— Load a template… —"}
               </option>
               {emailTemplates.map((t) => (

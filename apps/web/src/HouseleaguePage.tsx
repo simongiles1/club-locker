@@ -4,10 +4,14 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { ChevronDown, Eye, EyeOff } from "lucide-react";
 import { api } from "./api.js";
+import { BookingPage } from "./BookingPage.js";
+import { EmailsPage } from "./EmailsPage.js";
 import { Schedule } from "./Schedule.js";
+import { useToast } from "./toast.js";
 
 export type BoxLeagueEvent = {
   eventId: number;
@@ -242,8 +246,21 @@ function groupPlayersByBox(
   }));
 }
 
-export function HouseleaguePage() {
-  const [pageTab, setPageTab] = useState<"players" | "schedule">("players");
+export function HouseleaguePage({
+  seasonId,
+  seasonStartMondayISO,
+  seasonControls,
+  onLog,
+}: {
+  seasonId: string;
+  seasonStartMondayISO: string;
+  seasonControls: ReactNode;
+  onLog: (message: string) => void;
+}) {
+  const { show } = useToast();
+  const [pageTab, setPageTab] = useState<
+    "players" | "schedule" | "booking" | "emails"
+  >("players");
 
   const [events, setEvents] = useState<BoxLeagueEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(true);
@@ -360,61 +377,95 @@ export function HouseleaguePage() {
 
   return (
     <div className="houseleague-page">
-      <div
-        className="houseleague-page-tabs"
-        role="tablist"
-        aria-label="Houseleague"
-      >
-        <button
-          type="button"
-          role="tab"
-          id="tab-houseleague-players"
-          aria-selected={pageTab === "players"}
-          aria-controls="panel-houseleague-players"
-          className={pageTab === "players" ? "is-active" : ""}
-          onClick={() => setPageTab("players")}
-        >
-          Players
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id="tab-houseleague-schedule"
-          aria-selected={pageTab === "schedule"}
-          aria-controls="panel-houseleague-schedule"
-          className={pageTab === "schedule" ? "is-active" : ""}
-          onClick={() => setPageTab("schedule")}
-        >
-          Schedule
-        </button>
-      </div>
-      <div className="houseleague-main-header">
-        <h1 className="houseleague-title">Houseleague</h1>
-        {pageTab === "players" ? (
-          <div className="row houseleague-header-controls">
-            <label className="houseleague-event-label">
-              League event{" "}
-              <LeagueEventPicker
-                events={eventsForDropdown}
-                value={selectedEventId}
-                onChange={setSelectedEventId}
-                disabled={eventsLoading || events.length === 0}
-              />
-            </label>
+      <h1 className="houseleague-page-title">Houseleague</h1>
+      <p className="houseleague-lead houseleague-lead--page">
+        Box league tools from US Squash: registrants by box (drag between boxes to
+        update assignments), the weekly schedule, shared court booking, and league
+        email drafting.
+      </p>
+
+      <div className="houseleague-page-toolbar">
+        <div className="houseleague-page-toolbar-tabs">
+          <div
+            className="houseleague-page-tabs"
+            role="tablist"
+            aria-label="Houseleague"
+          >
             <button
               type="button"
-              className="secondary"
-              disabled={eventsLoading}
-              onClick={() => {
-                loadEvents().catch(() => {
-                  /* handled */
-                });
-              }}
+              role="tab"
+              id="tab-houseleague-players"
+              aria-selected={pageTab === "players"}
+              aria-controls="panel-houseleague-players"
+              className={pageTab === "players" ? "is-active" : ""}
+              onClick={() => setPageTab("players")}
             >
-              Refresh
+              Players
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-houseleague-schedule"
+              aria-selected={pageTab === "schedule"}
+              aria-controls="panel-houseleague-schedule"
+              className={pageTab === "schedule" ? "is-active" : ""}
+              onClick={() => setPageTab("schedule")}
+            >
+              Schedule
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-houseleague-booking"
+              aria-selected={pageTab === "booking"}
+              aria-controls="panel-houseleague-booking"
+              className={pageTab === "booking" ? "is-active" : ""}
+              onClick={() => setPageTab("booking")}
+            >
+              Court booking
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-houseleague-emails"
+              aria-selected={pageTab === "emails"}
+              aria-controls="panel-houseleague-emails"
+              className={pageTab === "emails" ? "is-active" : ""}
+              onClick={() => setPageTab("emails")}
+            >
+              Emails
             </button>
           </div>
-        ) : null}
+        </div>
+        <div className="houseleague-toolbar-actions">
+          {pageTab === "players" ? (
+            <div className="row houseleague-header-controls">
+              <label className="houseleague-event-label">
+                League event{" "}
+                <LeagueEventPicker
+                  events={eventsForDropdown}
+                  value={selectedEventId}
+                  onChange={setSelectedEventId}
+                  disabled={eventsLoading || events.length === 0}
+                />
+              </label>
+              <button
+                type="button"
+                className="secondary"
+                disabled={eventsLoading}
+                onClick={() => {
+                  loadEvents().catch(() => {
+                    /* handled */
+                  });
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+          ) : pageTab === "booking" || pageTab === "emails" ? (
+            <div className="row houseleague-header-controls">{seasonControls}</div>
+          ) : null}
+        </div>
       </div>
 
       {pageTab === "players" ? (
@@ -423,12 +474,6 @@ export function HouseleaguePage() {
           role="tabpanel"
           aria-labelledby="tab-houseleague-players"
         >
-          <p className="houseleague-lead">
-            Box league registrants from US Squash, grouped by box for the
-            selected league event. Drag a player onto another box to update their
-            assignment (US Squash API).
-          </p>
-
           {eventsError ? (
             <div
               className="houseleague-banner houseleague-banner--error"
@@ -602,13 +647,33 @@ export function HouseleaguePage() {
             })}
           </div>
         </div>
-      ) : (
+      ) : pageTab === "schedule" ? (
         <div
           id="panel-houseleague-schedule"
           role="tabpanel"
           aria-labelledby="tab-houseleague-schedule"
         >
           <Schedule embedded />
+        </div>
+      ) : pageTab === "emails" ? (
+        <div
+          id="panel-houseleague-emails"
+          role="tabpanel"
+          aria-labelledby="tab-houseleague-emails"
+        >
+          <EmailsPage onLog={show} />
+        </div>
+      ) : (
+        <div
+          id="panel-houseleague-booking"
+          role="tabpanel"
+          aria-labelledby="tab-houseleague-booking"
+        >
+          <BookingPage
+            seasonId={seasonId}
+            seasonStartMondayISO={seasonStartMondayISO}
+            onLog={onLog}
+          />
         </div>
       )}
     </div>

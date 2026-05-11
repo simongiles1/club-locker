@@ -48,14 +48,17 @@ import {
 } from "./phase2/booking.js";
 import { applyRatingAdjustments } from "./phase2/rating-feedback.js";
 import {
+  listAllCancellableBookings,
   listBookingHolds,
   listBookingRuns,
+  listCancellableBookingsForWeek,
   listSeasonBookingHolds,
   previewBooking,
   previewSeasonBulk,
   removeSeasonBookingHold,
   runSeasonBulkBooking,
   runWeeklyConvert,
+  cancelBookingCalendarItems,
 } from "./booking/service.js";
 import {
   createUssquashClient,
@@ -167,24 +170,30 @@ app.post("/api/booking/single-court-match", async (req, reply) => {
     });
   }
   try {
+    const inbound = body.data;
     const result = await runSingleCourtMatchBooking(config, {
-      date: body.data.date,
-      slotBegin: body.data.slotBegin,
-      slotEnd: body.data.slotEnd,
-      courtSide: body.data.courtSide,
-      player1SsmId: body.data.player1SsmId,
-      player2SsmId: body.data.player2SsmId,
-      player1Name: body.data.player1Name,
-      player2Name: body.data.player2Name,
+      date: inbound.date,
+      slotBegin: inbound.slotBegin,
+      slotEnd: inbound.slotEnd,
+      courtSide: inbound.courtSide,
+      player1SsmId: inbound.player1SsmId,
+      player2SsmId: inbound.player2SsmId,
+      player1Name: inbound.player1Name,
+      player2Name: inbound.player2Name,
     });
+    const payload = {
+      ...result,
+      debugInboundBody: inbound,
+      debugOutboundClubLockerBody: result.outboundClubLockerBody,
+    };
     const code =
       result.ok ? 200
       : result.status >= 400 && result.status < 600 ? result.status
       : 502;
     if (!result.ok) {
-      return reply.code(code).send(result);
+      return reply.code(code).send(payload);
     }
-    return result;
+    return payload;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return reply.code(500).send({ ok: false, status: 500, data: null, message });
@@ -1003,6 +1012,70 @@ app.post("/api/seasons/:seasonId/booking/convert", async (req) => {
     })
     .parse(req.body);
   return runWeeklyConvert(db, config, { seasonId, ...body });
+});
+
+app.get(
+  "/api/seasons/:seasonId/booking/cancellable",
+  async (req) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const q = z
+      .object({
+        startMondayDate: z.string().min(1),
+      })
+      .parse(req.query);
+    return listAllCancellableBookings(db, config, seasonId, q.startMondayDate);
+  },
+);
+
+app.get(
+  "/api/seasons/:seasonId/booking/weeks/:week/cancellable",
+  async (req) => {
+    const { seasonId, week } = req.params as { seasonId: string; week: string };
+    const q = z
+      .object({
+        startMondayDate: z.string().min(1),
+      })
+      .parse(req.query);
+    return listCancellableBookingsForWeek(
+      db,
+      config,
+      seasonId,
+      q.startMondayDate,
+      Number(week),
+    );
+  },
+);
+
+app.post("/api/seasons/:seasonId/booking/cancel-calendar", async (req) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      startMondayDate: z.string().min(1),
+      notifyUsers: z.boolean().optional().default(true),
+      items: z
+        .array(
+          z.discriminatedUnion("kind", [
+            z.object({
+              kind: z.literal("bulk"),
+              week: z.coerce.number().int().min(1),
+              date: z.string().min(1),
+              begin: z.string().min(1),
+              end: z.string().min(1),
+              courtSide: z.enum(["stadium", "center"]).optional(),
+            }),
+            z.object({
+              kind: z.literal("match"),
+              week: z.coerce.number().int().min(1),
+              date: z.string().min(1),
+              begin: z.string().min(1),
+              end: z.string().min(1),
+            }),
+          ]),
+        )
+        .min(1),
+    })
+    .parse(req.body);
+  return cancelBookingCalendarItems(db, config, { seasonId, ...body });
 });
 
 app.get("/api/seasons/:seasonId/booking/holds", async (req) => {
