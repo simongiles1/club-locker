@@ -11,6 +11,49 @@ function resolveSqlitePath(databaseUrl: string): string {
   return databaseUrl;
 }
 
+/** Idempotent CREATE TABLE statements for core monorepo tables. */
+function migrateCoreTables(sqlite: InstanceType<typeof Database>) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS players (
+      id text PRIMARY KEY,
+      external_id text,
+      display_name text NOT NULL,
+      email text,
+      rating text NOT NULL DEFAULT '3.0',
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS seasons (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      club_year integer,
+      calendar_segment text,
+      start_monday_date text,
+      start_date text,
+      end_date text,
+      status text NOT NULL DEFAULT 'registration',
+      championship_round_due_dates_json text,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS league_boxes (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      box_number integer NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS league_box_players (
+      id text PRIMARY KEY,
+      box_id text NOT NULL REFERENCES league_boxes(id) ON DELETE CASCADE,
+      player_id text NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+      seat integer NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS enrollments (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      player_id text NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+      status text NOT NULL DEFAULT 'enrolled'
+    );
+  `);
+}
+
 /** Apply additive SQLite schema updates (no drizzle migrator in repo). */
 function migrateSqliteSeasonsColumns(sqlite: InstanceType<typeof Database>) {
   const rows = sqlite.prepare("PRAGMA table_info(seasons)").all() as {
@@ -206,6 +249,7 @@ export function createDb(databaseUrl: string) {
   const sqlite = new Database(filePath);
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
+  migrateCoreTables(sqlite);
   migrateSqliteSeasonsColumns(sqlite);
   migrateChampionshipTables(sqlite);
   migrateEmailTemplatesTable(sqlite);
