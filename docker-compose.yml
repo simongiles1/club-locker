@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "21201:3001"
+    environment:
+      - DATABASE_URL=file:/app/data/squash.db
+      - NODE_ENV=production
+      - PORT=3001
+      # Langfuse tracing (internal URL)
+      - LANGFUSE_HOST=http://langfuse-server:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-d01686db-94d5-42ba-b75d-468179477295}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-bf88ff39-f1f4-4f41-b948-745ad4529695}
+      # Club Locker
+      - CLUB_LOCKER_ADAPTER=mock
+      - EMAIL_ADAPTER=gmail
+      - GMAIL_USER=cambridgeclubchamps@gmail.com
+      - GMAIL_APP_PASSWORD=qokd wadb vdyi edoa
+      - GMAIL_FROM_NAME=Martin Heath
+      # AI
+      - AI_AGENT=gemini
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # US Squash / Club Locker (server-only; never expose to the web app)
+      - US_SQUASH_MODE=${US_SQUASH_MODE:-live}
+      - US_SQUASH_BEARER_TOKEN=${US_SQUASH_BEARER_TOKEN}
+      - US_SQUASH_SESSION_COOKIE=${US_SQUASH_SESSION_COOKIE}
+      - US_SQUASH_CLUB_ID=${US_SQUASH_CLUB_ID}
+      - US_SQUASH_COURT_1_ID=${US_SQUASH_COURT_1_ID}
+      - US_SQUASH_COURT_2_ID=${US_SQUASH_COURT_2_ID}
+      # Coolify will inject other vars like GEMINI_API_KEY, CLUB_LOCKER secrets, etc.
+    volumes:
+      - api_data:/app/data
+    depends_on:
+      - langfuse-server
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "21200:80"
+    depends_on:
+      - api
+
+  langfuse-server:
+    image: langfuse/langfuse:2
+    restart: unless-stopped
+    ports:
+      - "21202:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-changeme-langfuse-secret}
+      SALT: ${SALT:-changeme-langfuse-salt}
+      NEXTAUTH_URL: http://localhost:21202
+      TELEMETRY_ENABLED: "false"
+    depends_on:
+      - langfuse-db
+  
+  langfuse-db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_pg_data:/var/lib/postgresql/data
+
+volumes:
+  langfuse_pg_data:
+  api_data:

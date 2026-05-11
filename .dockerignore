@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.gitignore
+.dockerignore
+apps/*/node_modules
+apps/*/dist
+packages/*/node_modules
+packages/*/dist
+.env
+.env.local
+.env.*.local
