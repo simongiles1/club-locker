@@ -178,6 +178,23 @@ function migrateStatutoryHolidaysTable(sqlite: InstanceType<typeof Database>) {
   `);
 }
 
+function migrateFeedbackTicketsTable(sqlite: InstanceType<typeof Database>) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS feedback_tickets (
+      id text PRIMARY KEY,
+      kind text NOT NULL,
+      description text NOT NULL,
+      screenshot_mime text,
+      screenshot_base64 text,
+      completed_at text,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS feedback_tickets_created_idx
+      ON feedback_tickets(created_at);
+  `);
+  ensureColumn(sqlite, "feedback_tickets", "completed_at", "completed_at text");
+}
+
 function migrateEmailOutboxAndHouseLeagueReminders(
   sqlite: InstanceType<typeof Database>,
 ) {
@@ -332,6 +349,7 @@ export function createDb(databaseUrl: string) {
   migrateStatutoryHolidaysTable(sqlite);
   migrateAutomationTables(sqlite);
   migrateEmailOutboxAndHouseLeagueReminders(sqlite);
+  migrateFeedbackTicketsTable(sqlite);
   return drizzle(sqlite, { schema });
 }
 

@@ -498,6 +498,20 @@ export const executionSteps = sqliteTable("execution_steps", {
     .default(sql`(datetime('now'))`),
 });
 
+/** Bug reports and feature requests (shared table; `kind` distinguishes). */
+export const feedbackTickets = sqliteTable("feedback_tickets", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(),
+  description: text("description").notNull(),
+  screenshotMime: text("screenshot_mime"),
+  screenshotBase64: text("screenshot_base64"),
+  /** Set when marked complete (ISO-ish / SQLite datetime text); null = open. */
+  completedAt: text("completed_at"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});
+
 export const playersRelations = relations(players, ({ many }) => ({
   boxSeats: many(leagueBoxPlayers),
 }));

@@ -8,6 +8,7 @@ import {
 import { api } from "./api.js";
 import { ChampionshipsPage } from "./ChampionshipsPage.js";
 import { HouseleaguePage } from "./HouseleaguePage.js";
+import { FeedbackPage } from "./FeedbackPage.js";
 import { MembersPage } from "./MembersPage.js";
 
 type Season = {
@@ -72,7 +73,7 @@ function distinctClubYearsDescending(seasons: Season[]): number[] {
   }
   return [...ys].sort((a, b) => b - a);
 }
-type Tab = "houseleague" | "championships" | "members";
+type Tab = "houseleague" | "championships" | "members" | "feedback";
 
 /** Members tab still renders when active; toggle to show the nav link again. */
 const SHOW_MEMBERS_IN_NAV = false;
@@ -146,7 +147,7 @@ export function App() {
     seasons.find((x) => x.id === seasonId)?.clubYear ?? null;
 
   const headerSeasonControls =
-    tab === "championships" ? null : seasonSelectControls;
+    tab === "championships" || tab === "feedback" ? null : seasonSelectControls;
 
   const selectedSeason =
     seasons.find((x) => x.id === seasonId) ?? null;
@@ -172,6 +173,13 @@ export function App() {
           onClick={() => setTab("championships")}
         >
           Championships
+        </button>
+        <button
+          type="button"
+          className={tab === "feedback" ? "active" : ""}
+          onClick={() => setTab("feedback")}
+        >
+          Feedback
         </button>
         {SHOW_MEMBERS_IN_NAV ? (
           <button
@@ -210,6 +218,7 @@ export function App() {
             }}
           />
         )}
+        {tab === "feedback" && <FeedbackPage />}
         {tab === "members" && <MembersPage />}
       </main>
     </div>

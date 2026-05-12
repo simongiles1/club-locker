@@ -26,6 +26,7 @@ import {
   emailOutbox,
   emailTemplates,
   enrollments,
+  feedbackTickets,
   leagueBoxes,
   leagueBoxPlayers,
   bookingProposals,
@@ -205,6 +206,189 @@ app.delete("/api/statutory-holidays/:id", async (req, reply) => {
   const res = db
     .delete(statutoryHolidays)
     .where(eq(statutoryHolidays.id, id.data))
+    .run();
+  if (res.changes === 0) {
+    return reply.code(404).send({ error: "Not found" });
+  }
+  return { ok: true as const };
+});
+
+const FEEDBACK_SCREENSHOT_MAX_BYTES = 3 * 1024 * 1024;
+
+const feedbackTicketPostBody = z.preprocess((raw: unknown) => {
+  if (!raw || typeof raw !== "object") return raw;
+  const o = { ...(raw as Record<string, unknown>) };
+  const sb = o.screenshotBase64;
+  if (typeof sb === "string" && sb.trimStart().startsWith("data:")) {
+    const m = sb.match(/^data:([^;]+);base64,(.+)$/);
+    if (m) {
+      if (o.screenshotMime == null || o.screenshotMime === "") {
+        o.screenshotMime = m[1];
+      }
+      o.screenshotBase64 = m[2]!.replace(/\s/g, "");
+    }
+  }
+  return o;
+}, z
+  .object({
+    kind: z.enum(["bug", "feature"]),
+    description: z.string().trim().min(1).max(20_000),
+    screenshotMime: z.string().optional().nullable(),
+    screenshotBase64: z.string().optional().nullable(),
+  })
+  .superRefine((data, ctx) => {
+    const mime = data.screenshotMime?.trim() || null;
+    const b64 = data.screenshotBase64?.trim() || null;
+    if (!mime && !b64) return;
+    if (!mime || !b64) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Screenshot requires both MIME type and base64 data.",
+        path: ["screenshotBase64"],
+      });
+      return;
+    }
+    if (!/^image\/(png|jpe?g|gif|webp)$/i.test(mime)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Screenshot must be PNG, JPEG, GIF, or WebP.",
+        path: ["screenshotMime"],
+      });
+      return;
+    }
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(b64, "base64");
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Invalid base64 image data.",
+        path: ["screenshotBase64"],
+      });
+      return;
+    }
+    if (buf.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Empty image data.",
+        path: ["screenshotBase64"],
+      });
+      return;
+    }
+    if (buf.length > FEEDBACK_SCREENSHOT_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Screenshot too large (max ${FEEDBACK_SCREENSHOT_MAX_BYTES / (1024 * 1024)}MB).`,
+        path: ["screenshotBase64"],
+      });
+    }
+  }));
+
+function feedbackTicketRowToJson(row: typeof feedbackTickets.$inferSelect) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    description: row.description,
+    screenshot:
+      row.screenshotMime && row.screenshotBase64
+        ? { mime: row.screenshotMime, base64: row.screenshotBase64 }
+        : null,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+  };
+}
+
+app.get("/api/feedback-tickets", async () => {
+  const rows = db
+    .select()
+    .from(feedbackTickets)
+    .orderBy(
+      desc(sql`${feedbackTickets.completedAt} IS NULL`),
+      desc(feedbackTickets.createdAt),
+    )
+    .all();
+  return rows.map(feedbackTicketRowToJson);
+});
+
+app.post(
+  "/api/feedback-tickets",
+  { bodyLimit: 8 * 1024 * 1024 },
+  async (req, reply) => {
+    const parsed = feedbackTicketPostBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "Invalid body",
+        details: parsed.error.flatten(),
+      });
+    }
+    const body = parsed.data;
+    const mime = body.screenshotMime?.trim() || null;
+    const b64 = body.screenshotBase64?.trim() || null;
+    const id = crypto.randomUUID();
+    db.insert(feedbackTickets)
+      .values({
+        id,
+        kind: body.kind,
+        description: body.description.trim(),
+        screenshotMime: mime && b64 ? mime : null,
+        screenshotBase64: mime && b64 ? b64 : null,
+      })
+      .run();
+    const row = db
+      .select()
+      .from(feedbackTickets)
+      .where(eq(feedbackTickets.id, id))
+      .get();
+    return row ? feedbackTicketRowToJson(row) : null;
+  },
+);
+
+const feedbackTicketPatchBody = z.object({
+  completed: z.boolean(),
+});
+
+app.patch("/api/feedback-tickets/:id", async (req, reply) => {
+  const { id: paramId } = req.params as { id: string };
+  const idParse = z.string().uuid().safeParse(paramId);
+  if (!idParse.success) {
+    return reply.code(400).send({ error: "Invalid id" });
+  }
+  const parsed = feedbackTicketPatchBody.safeParse(req.body);
+  if (!parsed.success) {
+    return reply.code(400).send({
+      error: "Invalid body",
+      details: parsed.error.flatten(),
+    });
+  }
+  const { completed } = parsed.data;
+  const completedAt = completed
+    ? new Date().toISOString().replace(/\.\d{3}Z$/, "Z")
+    : null;
+  const res = db
+    .update(feedbackTickets)
+    .set({ completedAt })
+    .where(eq(feedbackTickets.id, idParse.data))
+    .run();
+  if (res.changes === 0) {
+    return reply.code(404).send({ error: "Not found" });
+  }
+  const row = db
+    .select()
+    .from(feedbackTickets)
+    .where(eq(feedbackTickets.id, idParse.data))
+    .get();
+  return row ? feedbackTicketRowToJson(row) : null;
+});
+
+app.delete("/api/feedback-tickets/:id", async (req, reply) => {
+  const { id: paramId } = req.params as { id: string };
+  const idParse = z.string().uuid().safeParse(paramId);
+  if (!idParse.success) {
+    return reply.code(400).send({ error: "Invalid id" });
+  }
+  const res = db
+    .delete(feedbackTickets)
+    .where(eq(feedbackTickets.id, idParse.data))
     .run();
   if (res.changes === 0) {
     return reply.code(404).send({ error: "Not found" });
