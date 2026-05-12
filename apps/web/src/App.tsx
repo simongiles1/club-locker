@@ -5,6 +5,7 @@ import {
   seasonStartMondayLocal,
   type BookingCalendarSeason,
 } from "@squash/shared";
+import { api } from "./api.js";
 import { ChampionshipsPage } from "./ChampionshipsPage.js";
 import { HouseleaguePage } from "./HouseleaguePage.js";
 import { MembersPage } from "./MembersPage.js";
