@@ -5,6 +5,7 @@ import { and, eq, desc, asc, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   assignManagedCourts,
+  EMAIL_TEMPLATE_SCOPES,
   getWeekMatchups,
   interpolateEmailTemplate,
   suggestDraw,
@@ -19,6 +20,7 @@ import {
   ensureCalendarSeasonRows,
   insertCalendarYearSeasons,
 } from "./db/calendarSeasonsSeed.js";
+import { ensureStatutoryHolidaysSeeded } from "./db/statutoryHolidaysSeed.js";
 import {
   drawVersions,
   emailOutbox,
@@ -31,6 +33,7 @@ import {
   players,
   registrationQueue,
   seasons,
+  statutoryHolidays,
   syncRuns,
   weekPlans,
 } from "./db/schema.js";
@@ -76,9 +79,16 @@ import { registerAutomationRoutes } from "./automation/routes.js";
 import { ImapAutomationPoller } from "./automation/imapPoller.js";
 import { runSchedulerTick } from "./automation/scheduler.js";
 import { isSettingOn, seedAutomationSettings } from "./automation/settings.js";
+import {
+  getHouseLeagueEmailReminderSettings,
+  patchHouseLeagueEmailReminderSettings,
+  seedHouseLeagueEmailReminderSettings,
+} from "./houseLeague/emailReminderSettings.js";
+import { queueHouseLeagueReminderTestSend } from "./houseLeague/reminderTestSend.js";
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL);
+ensureStatutoryHolidaysSeeded(db);
 const emailAdapter = createEmailAdapter(config.EMAIL_ADAPTER, {
   gmail:
     config.GMAIL_USER && config.GMAIL_APP_PASSWORD
@@ -91,6 +101,7 @@ const emailAdapter = createEmailAdapter(config.EMAIL_ADAPTER, {
 });
 const aiAgent = createAiAgent(config);
 seedAutomationSettings(db);
+seedHouseLeagueEmailReminderSettings(db);
 const imapPoller = new ImapAutomationPoller({ db, config, emailAdapter, aiAgent });
 
 const mockLockerRoster: PlayerSeed[] = Array.from({ length: 24 }, (_, i) => ({
@@ -117,6 +128,89 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 app.get("/health", async () => ({ ok: true }));
+
+function statutoryHolidayRowToJson(row: typeof statutoryHolidays.$inferSelect) {
+  return {
+    id: row.id,
+    name: row.name,
+    date: row.date,
+    hours: {
+      open: row.openTime,
+      close: row.closeTime,
+      closed: row.closed === 1,
+    },
+  };
+}
+
+app.get("/api/statutory-holidays", async () => {
+  const rows = db
+    .select()
+    .from(statutoryHolidays)
+    .orderBy(asc(statutoryHolidays.date), asc(statutoryHolidays.name))
+    .all();
+  return rows.map(statutoryHolidayRowToJson);
+});
+
+const statutoryHolidayPostBody = z
+  .object({
+    name: z.string().min(1),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    open: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
+    close: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
+    closed: z.boolean(),
+  })
+  .superRefine((b, ctx) => {
+    if (!b.closed && (!b.open || !b.close)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "When the club is not fully closed, open and close times (HH:MM) are required.",
+        path: ["open"],
+      });
+    }
+  });
+
+app.post("/api/statutory-holidays", async (req, reply) => {
+  const body = statutoryHolidayPostBody.parse(req.body);
+  const clash = db
+    .select({ id: statutoryHolidays.id })
+    .from(statutoryHolidays)
+    .where(eq(statutoryHolidays.date, body.date))
+    .get();
+  if (clash) {
+    return reply.code(409).send({
+      error: "Another statutory holiday is already stored on that date.",
+    });
+  }
+  const id = crypto.randomUUID();
+  db.insert(statutoryHolidays)
+    .values({
+      id,
+      name: body.name.trim(),
+      date: body.date,
+      openTime: body.closed ? null : body.open,
+      closeTime: body.closed ? null : body.close,
+      closed: body.closed ? 1 : 0,
+    })
+    .run();
+  const row = db.select().from(statutoryHolidays).where(eq(statutoryHolidays.id, id)).get();
+  return row ? statutoryHolidayRowToJson(row) : null;
+});
+
+app.delete("/api/statutory-holidays/:id", async (req, reply) => {
+  const { id: paramId } = req.params as { id: string };
+  const id = z.string().uuid().safeParse(paramId);
+  if (!id.success) {
+    return reply.code(400).send({ error: "Invalid id" });
+  }
+  const res = db
+    .delete(statutoryHolidays)
+    .where(eq(statutoryHolidays.id, id.data))
+    .run();
+  if (res.changes === 0) {
+    return reply.code(404).send({ error: "Not found" });
+  }
+  return { ok: true as const };
+});
 
 registerChampionshipRoutes(app, db);
 registerAutomationRoutes(app, {
@@ -687,15 +781,41 @@ app.post("/api/seasons/:seasonId/weeks/:week/generate", async (req) => {
   return { weekPlanId: id, payload };
 });
 
+const emailTemplateScopeSchema = z.enum(EMAIL_TEMPLATE_SCOPES);
+
 /* Email templates (director-authored `{{variables}}`) */
-app.get("/api/email-templates", async () =>
-  db.select().from(emailTemplates).orderBy(asc(emailTemplates.name)).all(),
-);
+app.get("/api/email-templates", async (req, reply) => {
+  const rawQ =
+    typeof req.query === "object" && req.query !== null
+      ? (req.query as { scope?: unknown }).scope
+      : undefined;
+  const rawScope =
+    typeof rawQ === "string"
+      ? rawQ
+      : Array.isArray(rawQ) && typeof rawQ[0] === "string"
+        ? rawQ[0]
+        : undefined;
+
+  if (rawScope !== undefined && rawScope !== "") {
+    const scopeParsed = emailTemplateScopeSchema.safeParse(rawScope);
+    if (!scopeParsed.success) {
+      return reply.code(400).send({ error: "invalid_scope" });
+    }
+    return db
+      .select()
+      .from(emailTemplates)
+      .where(eq(emailTemplates.scope, scopeParsed.data))
+      .orderBy(asc(emailTemplates.name))
+      .all();
+  }
+  return db.select().from(emailTemplates).orderBy(asc(emailTemplates.name)).all();
+});
 
 const createEmailTemplateBody = z.object({
   name: z.string().min(1),
   subjectTemplate: z.string().min(1),
   bodyTemplate: z.string().min(1),
+  scope: emailTemplateScopeSchema,
 });
 
 app.post("/api/email-templates", async (req) => {
@@ -706,6 +826,7 @@ app.post("/api/email-templates", async (req) => {
     .values({
       id,
       name: body.name.trim(),
+      scope: body.scope,
       subjectTemplate: body.subjectTemplate,
       bodyTemplate: body.bodyTemplate,
       createdAt: now,
@@ -719,6 +840,7 @@ const patchEmailTemplateBody = z.object({
   name: z.string().min(1).optional(),
   subjectTemplate: z.string().min(1).optional(),
   bodyTemplate: z.string().min(1).optional(),
+  scope: emailTemplateScopeSchema.optional(),
 });
 
 app.patch("/api/email-templates/:id", async (req, reply) => {
@@ -726,7 +848,12 @@ app.patch("/api/email-templates/:id", async (req, reply) => {
   const row = db.select().from(emailTemplates).where(eq(emailTemplates.id, id)).get();
   if (!row) return reply.code(404).send({ error: "not_found" });
   const body = patchEmailTemplateBody.parse(req.body ?? {});
-  if (!body.name && body.subjectTemplate == null && body.bodyTemplate == null) {
+  if (
+    !body.name &&
+    body.subjectTemplate == null &&
+    body.bodyTemplate == null &&
+    body.scope == null
+  ) {
     return reply.code(400).send({ error: "nothing_to_patch" });
   }
   db.update(emailTemplates)
@@ -734,6 +861,7 @@ app.patch("/api/email-templates/:id", async (req, reply) => {
       ...(body.name != null ? { name: body.name.trim() } : {}),
       ...(body.subjectTemplate != null ? { subjectTemplate: body.subjectTemplate } : {}),
       ...(body.bodyTemplate != null ? { bodyTemplate: body.bodyTemplate } : {}),
+      ...(body.scope != null ? { scope: body.scope } : {}),
       updatedAt: new Date().toISOString(),
     })
     .where(eq(emailTemplates.id, id))
@@ -747,6 +875,37 @@ app.delete("/api/email-templates/:id", async (req, reply) => {
   if (!existing) return reply.code(404).send({ error: "not_found" });
   db.delete(emailTemplates).where(eq(emailTemplates.id, id)).run();
   return { ok: true };
+});
+
+const patchHouseLeagueRemindersBody = z.object({
+  enabled: z.boolean().optional(),
+  daysBefore: z.number().int().min(0).max(14).optional(),
+  templateId: z.string().nullable().optional(),
+});
+
+app.get("/api/house-league/email-reminders", async () =>
+  getHouseLeagueEmailReminderSettings(db),
+);
+
+app.patch("/api/house-league/email-reminders", async (req, reply) => {
+  const body = patchHouseLeagueRemindersBody.parse(req.body ?? {});
+  try {
+    return patchHouseLeagueEmailReminderSettings(db, body);
+  } catch (e) {
+    if (e instanceof Error && e.message === "invalid_template") {
+      return reply.code(400).send({ error: "invalid_template" });
+    }
+    throw e;
+  }
+});
+
+app.post("/api/house-league/email-reminders/test-send", async (req, reply) => {
+  const res = queueHouseLeagueReminderTestSend(db, req.body ?? {});
+  if (!res.ok) {
+    const code = res.error === "player_not_found" ? 404 : 400;
+    return reply.code(code).send({ error: res.error });
+  }
+  return { ok: true, id: res.id, scheduledSendAt: res.scheduledSendAt };
 });
 
 /* Email outbox */
@@ -978,7 +1137,7 @@ app.get(
         seasonWeeks: z.coerce.number().int().min(1).optional(),
       })
       .parse(req.query);
-    return previewSeasonBulk(config, {
+    return previewSeasonBulk(db, config, {
       seasonId,
       startMondayDate: q.startMondayDate,
       seasonWeeks: q.seasonWeeks ?? config.LEAGUE_SEASON_WEEKS,

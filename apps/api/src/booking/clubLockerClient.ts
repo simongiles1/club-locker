@@ -51,7 +51,8 @@ export function extractReservationIdsFromClinicResponse(data: unknown): string[]
   if (data == null) return [];
   if (typeof data === "object" && data !== null) {
     const o = data as Json;
-    if (Array.isArray(o.reservationIds)) {
+    /** Live clinics often return `{ id, reservationIds: [] }` — use `id` when the array is empty. */
+    if (Array.isArray(o.reservationIds) && o.reservationIds.length > 0) {
       return o.reservationIds.map((x) => String(x));
     }
   }

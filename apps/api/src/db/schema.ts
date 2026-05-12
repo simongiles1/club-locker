@@ -1,5 +1,5 @@
 import { relations, sql } from "drizzle-orm";
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const players = sqliteTable("players", {
   id: text("id").primaryKey(),
@@ -90,6 +90,8 @@ export const emailOutbox = sqliteTable("email_outbox", {
   kind: text("kind").notNull(),
   seasonId: text("season_id").references(() => seasons.id),
   status: text("status").notNull().default("draft"),
+  /** When set with status scheduled, dispatcher sends once this instant is reached. */
+  scheduledSendAt: text("scheduled_send_at"),
   toAddress: text("to_address").notNull(),
   subject: text("subject").notNull(),
   body: text("body").notNull(),
@@ -106,6 +108,27 @@ export const appSettings = sqliteTable("app_settings", {
     .notNull()
     .default(sql`(datetime('now'))`),
 });
+
+/** Director-edited statutory / closure days for court booking (Canada default seeded once). */
+export const statutoryHolidays = sqliteTable(
+  "statutory_holidays",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    /** YYYY-MM-DD */
+    date: text("date").notNull(),
+    /** HH:MM or null when fully closed */
+    openTime: text("open_time"),
+    closeTime: text("close_time"),
+    closed: integer("closed").notNull().default(0),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    dateUidx: uniqueIndex("statutory_holidays_date_uidx").on(t.date),
+  }),
+);
 
 export const inboundEmails = sqliteTable("inbound_emails", {
   id: text("id").primaryKey(),
@@ -224,6 +247,69 @@ export const bookingRuns = sqliteTable("booking_runs", {
     .notNull()
     .default(sql`(datetime('now'))`),
 });
+
+/** Snapshot of managed match bookings after successful Club Locker conversion (HL reminders). */
+export const houseLeagueBookedOccurrences = sqliteTable(
+  "house_league_booked_occurrences",
+  {
+    id: text("id").primaryKey(),
+    seasonId: text("season_id")
+      .notNull()
+      .references(() => seasons.id, { onDelete: "cascade" }),
+    weekNumber: integer("week_number").notNull(),
+    playDate: text("play_date").notNull(),
+    slot: text("slot").notNull(),
+    courtId: integer("court_id").notNull(),
+    boxNumber: integer("box_number").notNull(),
+    player1Id: text("player1_id")
+      .notNull()
+      .references(() => players.id, { onDelete: "cascade" }),
+    player2Id: text("player2_id")
+      .notNull()
+      .references(() => players.id, { onDelete: "cascade" }),
+    bookingRunId: text("booking_run_id").references(() => bookingRuns.id, {
+      onDelete: "set null",
+    }),
+    reservationId: text("reservation_id"),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    uniqMatch: uniqueIndex("hl_occ_season_week_date_slot_box_uidx").on(
+      t.seasonId,
+      t.weekNumber,
+      t.playDate,
+      t.slot,
+      t.courtId,
+      t.boxNumber,
+    ),
+  }),
+);
+
+/** One row per successful HL match reminder enqueue (dedupe per player per occurrence). */
+export const houseLeagueMatchReminderSends = sqliteTable(
+  "house_league_match_reminder_sends",
+  {
+    id: text("id").primaryKey(),
+    occurrenceId: text("occurrence_id")
+      .notNull()
+      .references(() => houseLeagueBookedOccurrences.id, { onDelete: "cascade" }),
+    playerId: text("player_id")
+      .notNull()
+      .references(() => players.id, { onDelete: "cascade" }),
+    sentAt: text("sent_at").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    occPlayerUidx: uniqueIndex("hl_rem_send_occ_player_uidx").on(
+      t.occurrenceId,
+      t.playerId,
+    ),
+  }),
+);
 
 /** Pre-season recurring clinic block for the full season (Mon + Tue series, both courts each). */
 export const seasonBookingHolds = sqliteTable("season_booking_holds", {
@@ -348,6 +434,8 @@ export const championshipMatches = sqliteTable("championship_matches", {
 export const emailTemplates = sqliteTable("email_templates", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  /** `championships` vs `house_league` — controls which UI lists the template. */
+  scope: text("scope").notNull().default("championships"),
   subjectTemplate: text("subject_template").notNull(),
   bodyTemplate: text("body_template").notNull(),
   createdAt: text("created_at")

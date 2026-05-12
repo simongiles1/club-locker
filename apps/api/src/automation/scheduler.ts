@@ -1,12 +1,15 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { AppConfig } from "../config.js";
 import type { EmailAdapter } from "../adapters/email.js";
-import { championshipDraws, championshipMatchFollowups, championshipMatches, championships, emailOutbox } from "../db/schema.js";
+import { championshipDraws, championshipMatchFollowups, championshipMatches, championships } from "../db/schema.js";
 import { getChampionshipDetail, buildMatchAnnouncementDraft } from "../championships/service.js";
+import { stageAndMaybeSend } from "./emailOutboxStage.js";
 import { nowForAutomation } from "./clock.js";
 import { runWithExecution, type ExecutionTrigger, type StepRuntimeMode } from "./executions.js";
 import { shouldAutoSendForCurrentMode } from "./settings.js";
+import { processScheduledOutbox } from "../houseLeague/scheduledOutbox.js";
+import { processHouseLeagueMatchReminders } from "../houseLeague/matchReminderScheduler.js";
 
 type FollowupKind =
   | "round_announce"
@@ -19,51 +22,6 @@ type SchedulerResult = {
   sent: number;
   skipped: number;
 };
-
-function isoPlusMs(iso: string, ms: number): string {
-  return new Date(new Date(iso).getTime() + ms).toISOString();
-}
-
-async function stageAndMaybeSend(
-  db: Db,
-  emailAdapter: EmailAdapter,
-  autoSend: boolean,
-  email: {
-    kind: string;
-    seasonId?: string | null;
-    toAddress: string;
-    subject: string;
-    body: string;
-    meta: Record<string, unknown>;
-  },
-): Promise<{ outboxId: string; sent: boolean }> {
-  const outboxId = crypto.randomUUID();
-  db.insert(emailOutbox)
-    .values({
-      id: outboxId,
-      kind: email.kind,
-      seasonId: email.seasonId ?? null,
-      status: autoSend ? "approved" : "draft",
-      toAddress: email.toAddress,
-      subject: email.subject,
-      body: email.body,
-      metaJson: JSON.stringify(email.meta),
-    })
-    .run();
-  if (!autoSend) return { outboxId, sent: false };
-  const sendRes = await emailAdapter.send({
-    to: email.toAddress,
-    subject: email.subject,
-    body: email.body,
-    meta: email.meta,
-  });
-  if (!sendRes.ok) return { outboxId, sent: false };
-  db.update(emailOutbox)
-    .set({ status: "sent" })
-    .where(eq(emailOutbox.id, outboxId))
-    .run();
-  return { outboxId, sent: true };
-}
 
 function dueDateForMatch(match: typeof championshipMatches.$inferSelect, championshipRoundOneDueDate: string | null): string | null {
   if (match.dueDate) return match.dueDate;
@@ -91,6 +49,14 @@ export async function runSchedulerTick(
       const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
       const fortyEightHoursMs = 48 * 60 * 60 * 1000;
       const result: SchedulerResult = { staged: 0, sent: 0, skipped: 0 };
+
+      const schedOutbox = await ctx.step(
+        "scheduled_outbox",
+        {},
+        async () => processScheduledOutbox(db, emailAdapter, now),
+      );
+      result.sent += schedOutbox.sent;
+      result.skipped += schedOutbox.failed;
 
       const published = await ctx.step("load_published_draws", {}, async () =>
         db
@@ -264,6 +230,23 @@ export async function runSchedulerTick(
           }
         }
       }
+
+      const hl = await ctx.step(
+        "house_league_match_reminders",
+        {},
+        async () =>
+          processHouseLeagueMatchReminders(
+            db,
+            config,
+            emailAdapter,
+            now,
+            autoSend,
+            mode,
+          ),
+      );
+      result.staged += hl.staged;
+      result.sent += hl.sent;
+      result.skipped += hl.skipped;
 
       return result;
     },

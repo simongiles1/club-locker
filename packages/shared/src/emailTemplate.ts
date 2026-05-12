@@ -1,6 +1,10 @@
 const PLACEHOLDER_RE =
   /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 
+/** Where a saved director template applies (API + UI filter lists per area). */
+export const EMAIL_TEMPLATE_SCOPES = ["championships", "house_league"] as const;
+export type EmailTemplateScope = (typeof EMAIL_TEMPLATE_SCOPES)[number];
+
 /**
  * Normalize paste-from-Word quirks so `{{key}}` matches the interpolation regex:
  * strips zero‑width chars, maps common fullwidth braces to ASCII.
@@ -84,5 +88,36 @@ export const EMAIL_TEMPLATE_VARIABLE_DESCRIPTIONS: {
     key: "matchRound",
     description:
       "Bracket round label (e.g. round of 16, semis, final) when sending from a championship match.",
+  },
+  {
+    key: "matchDate",
+    description:
+      "House league booked match calendar date (YYYY-MM-DD), filled from the conversion snapshot.",
+  },
+  {
+    key: "matchSlot",
+    description:
+      "Courts/time window string for that booking (same as Club Locker slot).",
+  },
+  {
+    key: "matchTimeSlot",
+    description: "Alias of matchSlot for readability in templates.",
+  },
+  {
+    key: "opponentName",
+    description:
+      "The other roster player’s display name on this court booking.",
+  },
+  {
+    key: "boxNumber",
+    description: "League box number for this matchup.",
+  },
+  {
+    key: "weekNumber",
+    description: "House league season week number for this matchup.",
+  },
+  {
+    key: "courtLabel",
+    description: "Court 1 / Court 2 (or stadium label) resolved from booking config.",
   },
 ];

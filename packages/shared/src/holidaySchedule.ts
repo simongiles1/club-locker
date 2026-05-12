@@ -101,9 +101,25 @@ export function statHolidayForDate(isoDate: string): StatHoliday | null {
   return statutoryHolidaysForYear(year).find((h) => h.date === isoDate) ?? null;
 }
 
+/** Resolve a holiday from a director-configured list (e.g. API), keyed by calendar date. */
+export function statHolidayForDateInRegistry(
+  isoDate: string,
+  registry: readonly StatHoliday[],
+): StatHoliday | null {
+  return registry.find((h) => h.date === isoDate) ?? null;
+}
+
 export function isMondayStatHoliday(isoDate: string): boolean {
   const d = parseISODateLocal(isoDate);
   return d.getDay() === 1 && statHolidayForDate(isoDate) != null;
+}
+
+export function isMondayStatHolidayInRegistry(
+  isoDate: string,
+  registry: readonly StatHoliday[],
+): boolean {
+  const d = parseISODateLocal(isoDate);
+  return d.getDay() === 1 && statHolidayForDateInRegistry(isoDate, registry) != null;
 }
 
 export function seasonWeekPlayDates(
@@ -120,6 +136,39 @@ export function seasonWeekPlayDates(
   const weekMonday = addDaysISO(startMondayIso, (safeWeek - 1) * 7);
   const holiday = statHolidayForDate(weekMonday);
   const shifted = holiday != null && isMondayStatHoliday(weekMonday);
+  if (shifted) {
+    return {
+      weekMonday,
+      firstPlayDate: addDaysISO(weekMonday, 1),
+      secondPlayDate: addDaysISO(weekMonday, 2),
+      shiftedByHoliday: true,
+      holidayName: holiday.name,
+    };
+  }
+  return {
+    weekMonday,
+    firstPlayDate: weekMonday,
+    secondPlayDate: addDaysISO(weekMonday, 1),
+    shiftedByHoliday: false,
+  };
+}
+
+/** Like {@link seasonWeekPlayDates} but uses `registry` instead of built-in statutory dates. */
+export function seasonWeekPlayDatesWithRegistry(
+  startMondayIso: string,
+  weekNumber: number,
+  registry: readonly StatHoliday[],
+): {
+  weekMonday: string;
+  firstPlayDate: string;
+  secondPlayDate: string;
+  shiftedByHoliday: boolean;
+  holidayName?: string;
+} {
+  const safeWeek = Math.max(1, weekNumber);
+  const weekMonday = addDaysISO(startMondayIso, (safeWeek - 1) * 7);
+  const holiday = statHolidayForDateInRegistry(weekMonday, registry);
+  const shifted = holiday != null && isMondayStatHolidayInRegistry(weekMonday, registry);
   if (shifted) {
     return {
       weekMonday,

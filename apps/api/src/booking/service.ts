@@ -1,13 +1,15 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, asc } from "drizzle-orm";
 import type { InferSelectModel } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
   bookingHolds,
   bookingRuns,
+  houseLeagueBookedOccurrences,
   players,
   seasonBookingHolds,
   seasons,
+  statutoryHolidays,
   weekPlans,
 } from "../db/schema.js";
 import {
@@ -22,12 +24,12 @@ import {
   BULK_MONDAY_TIME_WINDOWS,
   BULK_TUESDAY_TIME_WINDOWS,
   bulkHoldSlotsForWeekday,
-  seasonWeekPlayDates,
+  seasonWeekPlayDatesWithRegistry,
+  type StatHoliday,
 } from "@squash/shared";
 import {
   allBulkSlotCourts,
   allBulkSlotsForSingleDay,
-  singleCourtSlotsForDay,
 } from "./slotMap.js";
 
 type PlayerRow = InferSelectModel<typeof players>;
@@ -41,6 +43,33 @@ const SLOTS_PER_PLAY_DAY = 8 * 2; // slot labels × two courts (matches allBulkS
  * Matches `REGULAR_SEASON_WEEKS_IN_CALENDAR + 1` on the booking calendar (apps/web).
  */
 const HOUSE_LEAGUE_SEMIS_WEEK_NUMBER = 8;
+
+function statHolidayRegistryFromDb(db: Db): StatHoliday[] {
+  const rows = db
+    .select()
+    .from(statutoryHolidays)
+    .orderBy(asc(statutoryHolidays.date))
+    .all();
+  return rows.map((r) => ({
+    name: r.name,
+    date: r.date,
+    hours: {
+      open: r.openTime,
+      close: r.closeTime,
+      closed: r.closed === 1,
+    },
+  }));
+}
+
+function seasonWeekPlayDatesForDb(
+  db: Db,
+  startMondayDate: string,
+  weekNumber: number,
+  registry?: readonly StatHoliday[],
+): ReturnType<typeof seasonWeekPlayDatesWithRegistry> {
+  const reg = registry ?? statHolidayRegistryFromDb(db);
+  return seasonWeekPlayDatesWithRegistry(startMondayDate, weekNumber, reg);
+}
 
 /** User-facing fragment for Cancel bookings (e.g. "Semis" vs "Week 3"). */
 export function bulkCancelWeekLabelPart(week: number): string {
@@ -78,25 +107,6 @@ function formatBulkTimeWindowsForOperator(): string {
     (w) => `${w.begin}–${w.end}`,
   ).join(", ");
   return `Times this app books (24h, club local): Mon ${mon}; Tue ${tue}.`;
-}
-
-/**
- * Merges two parallel recurring series (same slot order) into interleaved slot×court order:
- * s0c1, s0c2, s1c1, s1c2, …
- */
-function mergeRecurringClinicInterleavedIds(
-  idsCourt1: string[],
-  idsCourt2: string[],
-  seasonWeeks: number,
-  slotsPerDay = 8,
-): string[] {
-  const n = seasonWeeks * slotsPerDay;
-  const out: string[] = [];
-  for (let i = 0; i < n; i++) {
-    if (i < idsCourt1.length) out.push(idsCourt1[i]!);
-    if (i < idsCourt2.length) out.push(idsCourt2[i]!);
-  }
-  return out;
 }
 
 /**
@@ -178,10 +188,12 @@ function seasonPrefixForBulkClinicName(
 
 /** First Monday in `week` (1 = week of start Monday = startMonday) */
 function seasonPlayDates(
+  db: Db,
   startMonday: string,
   weekNumber: number,
+  registry?: readonly StatHoliday[],
 ): { mondayDate: string; tuesdayDate: string } {
-  const d = seasonWeekPlayDates(startMonday, weekNumber);
+  const d = seasonWeekPlayDatesForDb(db, startMonday, weekNumber, registry);
   return { mondayDate: d.firstPlayDate, tuesdayDate: d.secondPlayDate };
 }
 
@@ -226,8 +238,9 @@ function makeSeasonClinicBody(
 }
 
 /**
- * Slices the Monday- and Tuesday-series id lists for one play week. Each list has
- * length `seasonWeeks * SLOTS_PER_PLAY_DAY` when the API returns full recurring coverage.
+ * Slices the Monday- and Tuesday-series id lists for one play week.
+ * - Full layout: each list has length `seasonWeeks * SLOTS_PER_PLAY_DAY`.
+ * - Combined two-court clinic: each list has length `seasonWeeks` (one Club Locker id per play day).
  */
 export function reservationIdsForSeasonWeek(
   mondayIds: string[],
@@ -235,6 +248,17 @@ export function reservationIdsForSeasonWeek(
   weekNumber: number,
   seasonWeeks: number,
 ): string[] {
+  /** One combined clinic POST per play day per week: API returns a single `id` for Mon and for Tue. */
+  if (
+    mondayIds.length === seasonWeeks &&
+    tuesdayIds.length === seasonWeeks
+  ) {
+    const i = weekNumber - 1;
+    const mon = mondayIds[i];
+    const tue = tuesdayIds[i];
+    if (mon == null || tue == null) return [];
+    return [mon, tue];
+  }
   const compactPerWeekExpected = seasonWeeks * 2;
   if (
     mondayIds.length === compactPerWeekExpected &&
@@ -324,12 +348,14 @@ export function previewBooking(
 }
 
 export function previewSeasonBulk(
+  db: Db,
   config: AppConfig,
   input: { seasonId: string; startMondayDate: string; seasonWeeks: number },
 ) {
   const court1 = config.US_SQUASH_COURT_1_ID;
   const court2 = config.US_SQUASH_COURT_2_ID;
-  const week1 = seasonWeekPlayDates(input.startMondayDate, 1);
+  const holidayReg = statHolidayRegistryFromDb(db);
+  const week1 = seasonWeekPlayDatesForDb(db, input.startMondayDate, 1, holidayReg);
   const tuesdayOfWeek1 = week1.secondPlayDate;
   const mon = allBulkSlotsForSingleDay(week1.firstPlayDate, "mon", court1, court2);
   const tue = allBulkSlotsForSingleDay(tuesdayOfWeek1, "tue", court1, court2);
@@ -341,35 +367,21 @@ export function previewSeasonBulk(
     includesCourts: [number, number];
   }[] = [];
   for (let week = 1; week <= input.seasonWeeks; week++) {
-    const dates = seasonWeekPlayDates(input.startMondayDate, week);
+    const dates = seasonWeekPlayDatesForDb(db, input.startMondayDate, week, holidayReg);
     usSquashClinicCalls.push(
       {
-        label: `Week ${week} · Monday template · Stadium${dates.shiftedByHoliday ? " (shifted)" : ""}`,
+        label: `Week ${week} · Monday · both courts${dates.shiftedByHoliday ? " (shifted)" : ""}`,
         firstDate: dates.firstPlayDate,
-        slotCount: 8,
+        slotCount: 16,
         weeklyOccurrences: 1,
-        includesCourts: [court1, court1] as [number, number],
+        includesCourts: [court1, court2] as [number, number],
       },
       {
-        label: `Week ${week} · Monday template · Center${dates.shiftedByHoliday ? " (shifted)" : ""}`,
-        firstDate: dates.firstPlayDate,
-        slotCount: 8,
-        weeklyOccurrences: 1,
-        includesCourts: [court2, court2] as [number, number],
-      },
-      {
-        label: `Week ${week} · Tuesday template · Stadium${dates.shiftedByHoliday ? " (shifted)" : ""}`,
+        label: `Week ${week} · Tuesday · both courts${dates.shiftedByHoliday ? " (shifted)" : ""}`,
         firstDate: dates.secondPlayDate,
-        slotCount: 8,
+        slotCount: 16,
         weeklyOccurrences: 1,
-        includesCourts: [court1, court1] as [number, number],
-      },
-      {
-        label: `Week ${week} · Tuesday template · Center${dates.shiftedByHoliday ? " (shifted)" : ""}`,
-        firstDate: dates.secondPlayDate,
-        slotCount: 8,
-        weeklyOccurrences: 1,
-        includesCourts: [court2, court2] as [number, number],
+        includesCourts: [court1, court2] as [number, number],
       },
     );
   }
@@ -378,7 +390,7 @@ export function previewSeasonBulk(
     startMondayDate: input.startMondayDate,
     week1Tuesday: tuesdayOfWeek1,
     seasonWeeks: input.seasonWeeks,
-    /** Four `POST /clubs/{id}/clinics` calls: Mon/Tue × one series per court (recurring for multi-week, one-time for a 1-week test). */
+    /** Two `POST /clubs/{id}/clinics` calls per week: Monday and Tuesday, each with both courts in one payload (`slots` length 16). */
     usSquashClinicCalls,
     bff: {
       method: "POST" as const,
@@ -471,6 +483,7 @@ export async function runSeasonBulkBooking(
 
   const court1 = config.US_SQUASH_COURT_1_ID;
   const court2 = config.US_SQUASH_COURT_2_ID;
+  const holidayReg = statHolidayRegistryFromDb(db);
   const runId = crypto.randomUUID();
   const monIds: string[] = [];
   const tueIds: string[] = [];
@@ -481,54 +494,45 @@ export async function runSeasonBulkBooking(
     holidayName?: string;
     firstPlayDate: string;
     secondPlayDate: string;
-    mon: {
-      court1: { status: number; data: unknown };
-      court2: { status: number; data: unknown };
-    };
-    tue: {
-      court1: { status: number; data: unknown };
-      court2: { status: number; data: unknown };
-    };
+    mon: { combined: { status: number; data: unknown } };
+    tue: { combined: { status: number; data: unknown } };
   }[] = [];
 
   for (let week = 1; week <= seasonWeeks; week++) {
-    const dates = seasonWeekPlayDates(input.startMondayDate, week);
+    const dates = seasonWeekPlayDatesForDb(db, input.startMondayDate, week, holidayReg);
     const firstPlayLabel = `${weekdayLabel(dates.firstPlayDate)} ${dates.firstPlayDate}`;
     const secondPlayLabel = `${weekdayLabel(dates.secondPlayDate)} ${dates.secondPlayDate}`;
-    const monC1 = singleCourtSlotsForDay(dates.firstPlayDate, "mon", court1);
-    const monC2 = singleCourtSlotsForDay(dates.firstPlayDate, "mon", court2);
-    const tueC1 = singleCourtSlotsForDay(dates.secondPlayDate, "tue", court1);
-    const tueC2 = singleCourtSlotsForDay(dates.secondPlayDate, "tue", court2);
 
     const weekClinicName = houseLeagueSeasonBulkClinicName(clinicSeasonPrefix, week);
-    const bodyMon1 = makeSeasonClinicBody(
+    const monDayRows = allBulkSlotsForSingleDay(
+      dates.firstPlayDate,
+      "mon",
+      court1,
+      court2,
+    ).map(({ begin, end, courtId }) => ({ begin, end, courtId }));
+    const tueDayRows = allBulkSlotsForSingleDay(
+      dates.secondPlayDate,
+      "tue",
+      court1,
+      court2,
+    ).map(({ begin, end, courtId }) => ({ begin, end, courtId }));
+
+    const bodyMon = makeSeasonClinicBody(
       weekClinicName,
       dates.firstPlayDate,
-      monC1,
+      monDayRows,
       1,
     );
-    const bodyMon2 = makeSeasonClinicBody(
-      weekClinicName,
-      dates.firstPlayDate,
-      monC2,
-      1,
-    );
-    const bodyTue1 = makeSeasonClinicBody(
+    const bodyTue = makeSeasonClinicBody(
       weekClinicName,
       dates.secondPlayDate,
-      tueC1,
-      1,
-    );
-    const bodyTue2 = makeSeasonClinicBody(
-      weekClinicName,
-      dates.secondPlayDate,
-      tueC2,
+      tueDayRows,
       1,
     );
 
-    const resMon1 = await client.createClinic(config.US_SQUASH_CLUB_ID, bodyMon1);
-    if (resMon1.status < 200 || resMon1.status >= 300) {
-      const failErr = extractUssquashErrorString(resMon1.data) ?? `HTTP ${resMon1.status}`;
+    const resMon = await client.createClinic(config.US_SQUASH_CLUB_ID, bodyMon);
+    if (resMon.status < 200 || resMon.status >= 300) {
+      const failErr = extractUssquashErrorString(resMon.data) ?? `HTTP ${resMon.status}`;
       const conflict = isSlotTimeConflictError(failErr);
       db.insert(bookingRuns)
         .values({
@@ -541,7 +545,7 @@ export async function runSeasonBulkBooking(
             startMonday: input.startMondayDate,
             seasonWeeks,
             failedWeek: week,
-            failedStep: `${firstPlayLabel} · Stadium`,
+            failedStep: `${firstPlayLabel} · both courts`,
             conflict,
             plannedDates: {
               firstPlayDate: dates.firstPlayDate,
@@ -558,33 +562,33 @@ export async function runSeasonBulkBooking(
         seasonHoldId: "",
         status: "error",
         conflict: conflict || undefined,
-        mondayStatus: resMon1.status,
-        tuesdayStatus: resMon1.status,
+        mondayStatus: resMon.status,
+        tuesdayStatus: resMon.status,
         mondayReservationIdCount: 0,
         tuesdayReservationIdCount: 0,
-        message: `Failed at week ${week} (${firstPlayLabel} · Stadium): ${failErr} ${conflict ? formatBulkTimeWindowsForOperator() : ""}`,
+        message: `Failed at week ${week} (${firstPlayLabel} · both courts): ${failErr} ${conflict ? formatBulkTimeWindowsForOperator() : ""}`,
         rawResponse: {
           weeks: rawWeeks,
           failed: {
             week,
-            step: `${firstPlayLabel} · Stadium`,
+            step: `${firstPlayLabel} · both courts`,
             plannedDates: {
               firstPlayDate: dates.firstPlayDate,
               secondPlayDate: dates.secondPlayDate,
               shiftedByHoliday: dates.shiftedByHoliday,
               holidayName: dates.holidayName,
             },
-            response: resMon1,
+            response: resMon,
           },
         },
       };
     }
-    createdResponseBlobs.push(resMon1.data);
+    createdResponseBlobs.push(resMon.data);
 
-    const resMon2 = await client.createClinic(config.US_SQUASH_CLUB_ID, bodyMon2);
-    if (resMon2.status < 200 || resMon2.status >= 300) {
+    const resTue = await client.createClinic(config.US_SQUASH_CLUB_ID, bodyTue);
+    if (resTue.status < 200 || resTue.status >= 300) {
       await rollbackCreatedClinicResponses(client, createdResponseBlobs);
-      const failErr = extractUssquashErrorString(resMon2.data) ?? `HTTP ${resMon2.status}`;
+      const failErr = extractUssquashErrorString(resTue.data) ?? `HTTP ${resTue.status}`;
       const conflict = isSlotTimeConflictError(failErr);
       db.insert(bookingRuns)
         .values({
@@ -597,7 +601,7 @@ export async function runSeasonBulkBooking(
             startMonday: input.startMondayDate,
             seasonWeeks,
             failedWeek: week,
-            failedStep: `${firstPlayLabel} · Center`,
+            failedStep: `${secondPlayLabel} · both courts`,
             conflict,
             rolledBack: true,
             plannedDates: {
@@ -615,149 +619,31 @@ export async function runSeasonBulkBooking(
         seasonHoldId: "",
         status: "error",
         conflict: conflict || undefined,
-        mondayStatus: resMon2.status,
-        tuesdayStatus: resMon2.status,
+        mondayStatus: resTue.status,
+        tuesdayStatus: resTue.status,
         mondayReservationIdCount: 0,
         tuesdayReservationIdCount: 0,
-        message: `Failed at week ${week} (${firstPlayLabel} · Center): ${failErr} ${conflict ? formatBulkTimeWindowsForOperator() : ""} Earlier steps were rolled back (best effort).`,
+        message: `Failed at week ${week} (${secondPlayLabel} · both courts): ${failErr} ${conflict ? formatBulkTimeWindowsForOperator() : ""} Earlier steps were rolled back (best effort).`,
         rawResponse: {
           weeks: rawWeeks,
           failed: {
             week,
-            step: `${firstPlayLabel} · Center`,
+            step: `${secondPlayLabel} · both courts`,
             plannedDates: {
               firstPlayDate: dates.firstPlayDate,
               secondPlayDate: dates.secondPlayDate,
               shiftedByHoliday: dates.shiftedByHoliday,
               holidayName: dates.holidayName,
             },
-            response: resMon2,
+            response: resTue,
           },
         },
       };
     }
-    createdResponseBlobs.push(resMon2.data);
+    createdResponseBlobs.push(resTue.data);
 
-    const resTue1 = await client.createClinic(config.US_SQUASH_CLUB_ID, bodyTue1);
-    if (resTue1.status < 200 || resTue1.status >= 300) {
-      await rollbackCreatedClinicResponses(client, createdResponseBlobs);
-      const failErr = extractUssquashErrorString(resTue1.data) ?? `HTTP ${resTue1.status}`;
-      const conflict = isSlotTimeConflictError(failErr);
-      db.insert(bookingRuns)
-        .values({
-          id: runId,
-          seasonId: input.seasonId,
-          kind: "season_bulk",
-          weekNumber: null,
-          status: "error",
-          summaryJson: JSON.stringify({
-            startMonday: input.startMondayDate,
-            seasonWeeks,
-            failedWeek: week,
-            failedStep: `${secondPlayLabel} · Stadium`,
-            conflict,
-            rolledBack: true,
-            plannedDates: {
-              firstPlayDate: dates.firstPlayDate,
-              secondPlayDate: dates.secondPlayDate,
-              shiftedByHoliday: dates.shiftedByHoliday,
-              holidayName: dates.holidayName,
-            },
-          }),
-          holdId: null,
-        })
-        .run();
-      return {
-        runId,
-        seasonHoldId: "",
-        status: "error",
-        conflict: conflict || undefined,
-        mondayStatus: resTue1.status,
-        tuesdayStatus: resTue1.status,
-        mondayReservationIdCount: 0,
-        tuesdayReservationIdCount: 0,
-        message: `Failed at week ${week} (${secondPlayLabel} · Stadium): ${failErr} ${conflict ? formatBulkTimeWindowsForOperator() : ""} Earlier steps were rolled back (best effort).`,
-        rawResponse: {
-          weeks: rawWeeks,
-          failed: {
-            week,
-            step: `${secondPlayLabel} · Stadium`,
-            plannedDates: {
-              firstPlayDate: dates.firstPlayDate,
-              secondPlayDate: dates.secondPlayDate,
-              shiftedByHoliday: dates.shiftedByHoliday,
-              holidayName: dates.holidayName,
-            },
-            response: resTue1,
-          },
-        },
-      };
-    }
-    createdResponseBlobs.push(resTue1.data);
-
-    const resTue2 = await client.createClinic(config.US_SQUASH_CLUB_ID, bodyTue2);
-    if (resTue2.status < 200 || resTue2.status >= 300) {
-      await rollbackCreatedClinicResponses(client, createdResponseBlobs);
-      const failErr = extractUssquashErrorString(resTue2.data) ?? `HTTP ${resTue2.status}`;
-      const conflict = isSlotTimeConflictError(failErr);
-      db.insert(bookingRuns)
-        .values({
-          id: runId,
-          seasonId: input.seasonId,
-          kind: "season_bulk",
-          weekNumber: null,
-          status: "error",
-          summaryJson: JSON.stringify({
-            startMonday: input.startMondayDate,
-            seasonWeeks,
-            failedWeek: week,
-            failedStep: `${secondPlayLabel} · Center`,
-            conflict,
-            rolledBack: true,
-            plannedDates: {
-              firstPlayDate: dates.firstPlayDate,
-              secondPlayDate: dates.secondPlayDate,
-              shiftedByHoliday: dates.shiftedByHoliday,
-              holidayName: dates.holidayName,
-            },
-          }),
-          holdId: null,
-        })
-        .run();
-      return {
-        runId,
-        seasonHoldId: "",
-        status: "error",
-        conflict: conflict || undefined,
-        mondayStatus: resTue2.status,
-        tuesdayStatus: resTue2.status,
-        mondayReservationIdCount: 0,
-        tuesdayReservationIdCount: 0,
-        message: `Failed at week ${week} (${secondPlayLabel} · Center): ${failErr} ${conflict ? formatBulkTimeWindowsForOperator() : ""} Earlier steps were rolled back (best effort).`,
-        rawResponse: {
-          weeks: rawWeeks,
-          failed: {
-            week,
-            step: `${secondPlayLabel} · Center`,
-            plannedDates: {
-              firstPlayDate: dates.firstPlayDate,
-              secondPlayDate: dates.secondPlayDate,
-              shiftedByHoliday: dates.shiftedByHoliday,
-              holidayName: dates.holidayName,
-            },
-            response: resTue2,
-          },
-        },
-      };
-    }
-    createdResponseBlobs.push(resTue2.data);
-
-    const exMon1 = extractReservationIdsFromClinicResponse(resMon1.data);
-    const exMon2 = extractReservationIdsFromClinicResponse(resMon2.data);
-    const exTue1 = extractReservationIdsFromClinicResponse(resTue1.data);
-    const exTue2 = extractReservationIdsFromClinicResponse(resTue2.data);
-    monIds.push(...mergeRecurringClinicInterleavedIds(exMon1, exMon2, 1, 8));
-    tueIds.push(...mergeRecurringClinicInterleavedIds(exTue1, exTue2, 1, 8));
+    monIds.push(...extractReservationIdsFromClinicResponse(resMon.data));
+    tueIds.push(...extractReservationIdsFromClinicResponse(resTue.data));
     rawWeeks.push({
       week,
       shiftedByHoliday: dates.shiftedByHoliday,
@@ -765,24 +651,27 @@ export async function runSeasonBulkBooking(
       firstPlayDate: dates.firstPlayDate,
       secondPlayDate: dates.secondPlayDate,
       mon: {
-        court1: { status: resMon1.status, data: resMon1.data },
-        court2: { status: resMon2.status, data: resMon2.data },
+        combined: { status: resMon.status, data: resMon.data },
       },
       tue: {
-        court1: { status: resTue1.status, data: resTue1.data },
-        court2: { status: resTue2.status, data: resTue2.data },
+        combined: { status: resTue.status, data: resTue.data },
       },
     });
   }
-
   const expected = seasonWeeks * SLOTS_PER_PLAY_DAY;
   const compactPerWeekExpected = seasonWeeks * 2;
   const compactLegacyMon = monIds.length === 2;
   const compactLegacyTue = tueIds.length === 2;
+  const combinedClinicPerWeekLayout =
+    monIds.length === seasonWeeks &&
+    tueIds.length === seasonWeeks &&
+    monIds.length > 0;
   const monOk = monIds.length === 0 || monIds.length === expected ||
-    monIds.length === compactPerWeekExpected || compactLegacyMon;
+    monIds.length === compactPerWeekExpected || compactLegacyMon ||
+    combinedClinicPerWeekLayout;
   const tueOk = tueIds.length === 0 || tueIds.length === expected ||
-    tueIds.length === compactPerWeekExpected || compactLegacyTue;
+    tueIds.length === compactPerWeekExpected || compactLegacyTue ||
+    combinedClinicPerWeekLayout;
   if (!monOk) {
     console.warn(
       `runSeasonBulkBooking: Monday id count ${monIds.length} expected ${expected} (live API may return a different shape)`,
@@ -836,7 +725,7 @@ export async function runSeasonBulkBooking(
           ids: tueIds.length,
         },
         seasonHoldId: holdId,
-        sequentialClinicSteps: seasonWeeks * 4,
+        sequentialClinicSteps: seasonWeeks * 2,
       }),
       holdId: null,
     })
@@ -850,9 +739,14 @@ export async function runSeasonBulkBooking(
     tuesdayStatus: 200,
     mondayReservationIdCount: monIds.length,
     tuesdayReservationIdCount: tueIds.length,
-    message: hasIds && monOk && tueOk
-      ? "Season block created (one clinic per court for each play day/week). Reservation ids stored for weekly conversion."
-      : "Clinic(s) created but no reservation id parsed from response — conversion may not be able to release blocks.",
+    message:
+      hasIds && monOk && tueOk
+        ? combinedClinicPerWeekLayout
+          ? "Season block created (Club Locker returned one reservation id per play day per week for the combined two-court clinics; stored for conversion and cancel)."
+          : "Season block created (one clinic per play day per week, both courts in each clinic). Reservation ids stored for weekly conversion."
+        : !hasIds
+          ? "Clinic(s) created but no reservation id parsed from response — conversion may not be able to release blocks."
+          : `Clinic(s) were created, but stored id counts (Mon: ${monIds.length}, Tue: ${tueIds.length}) do not match a recognized layout (e.g. ${expected} per weekday for slot-level holds or ${seasonWeeks} per weekday for combined clinics). Check raw responses or Club Locker.`,
     rawResponse: { weeks: rawWeeks },
   };
 }
@@ -1068,15 +962,20 @@ export async function runWeeklyConvert(
     const compactSeriesStoredIds = mon.length === 2 && tue.length === 2;
     const compactPerWeekStoredIds =
       mon.length === compactPerWeekExpected && tue.length === compactPerWeekExpected;
+    const combinedClinicPerWeekStoredIds =
+      mon.length === seasonHold.seasonWeeks &&
+      tue.length === seasonHold.seasonWeeks;
     const usableShape =
       (mon.length === expected && tue.length === expected) ||
       compactPerWeekStoredIds ||
-      compactSeriesStoredIds;
+      compactSeriesStoredIds ||
+      combinedClinicPerWeekStoredIds;
     if (!usableShape) {
       return {
         runId: "",
         status: "error",
-        message: `Season hold is missing usable reservation id lists (expected ${expected} slot ids per day or ${compactPerWeekExpected} clinic ids per day). Re-run or fix API response shape.`,
+        message:
+          `Season hold is missing usable reservation id lists (expected ${expected} slot ids per weekday, ${compactPerWeekExpected} court-level ids per weekday, or ${seasonHold.seasonWeeks} combined-clinic ids per weekday). Re-run or fix API response shape.`,
         summary: { holdKind: "season", deleted: [], created: [], holdId: seasonHold.id },
       };
     }
@@ -1090,7 +989,7 @@ export async function runWeeklyConvert(
         input.week,
         seasonHold.seasonWeeks,
       );
-    const d = seasonPlayDates(seasonHold.startMondayDate, input.week);
+    const d = seasonPlayDates(db, seasonHold.startMondayDate, input.week);
     mondayDate = d.mondayDate;
     tuesdayDate = d.tuesdayDate;
   } else {
@@ -1229,6 +1128,32 @@ export async function runWeeklyConvert(
       holdId: null,
     })
     .run();
+
+  for (const it of items) {
+    const key = `b${it.boxNumber}-${it.playDate}-c${it.courtId}-${it.slot}`;
+    const c = created.find((x) => x.key === key);
+    if (!c?.ok) continue;
+    try {
+      db.insert(houseLeagueBookedOccurrences)
+        .values({
+          id: crypto.randomUUID(),
+          seasonId: input.seasonId,
+          weekNumber: input.week,
+          playDate: it.playDate,
+          slot: it.slot,
+          courtId: it.courtId,
+          boxNumber: it.boxNumber,
+          player1Id: it.internalPlayerIds[0]!,
+          player2Id: it.internalPlayerIds[1]!,
+          bookingRunId: runId,
+          reservationId: c.reservationId ?? null,
+        })
+        .run();
+    } catch {
+      // UNIQUE: idempotent inserts if the same matchup was duplicated in DB tooling.
+    }
+  }
+
   return {
     runId,
     status: allOk ? "ok" : "partial",
@@ -1296,6 +1221,7 @@ type InferredBulkHoldShape =
   | { kind: "full"; weeks: number }
   | { kind: "compact_weekly"; weeks: number }
   | { kind: "compact_series" }
+  | { kind: "combined_clinic_per_week"; weeks: number }
   | { kind: "unknown" };
 
 /**
@@ -1316,15 +1242,24 @@ export function inferBulkHoldShape(
     return { kind: "unknown" };
   }
   const n = mon.length;
-  /** One Stadium + one Center recurring clinic covering all occurrences on this weekday. */
-  if (n === 2) {
-    return { kind: "compact_series" };
-  }
   const declaredOk =
     typeof declaredSeasonWeeks === "number" &&
     Number.isFinite(declaredSeasonWeeks) &&
     declaredSeasonWeeks >= 1 &&
     declaredSeasonWeeks <= 1000;
+
+  /**
+   * One `id` per league week per weekday (combined two-court clinic POST), not 16 slot-level ids.
+   * Must run before `n === 2` compact_series so a 2-week season is not misread as stadium+center series.
+   */
+  if (declaredOk && n === declaredSeasonWeeks) {
+    return { kind: "combined_clinic_per_week", weeks: declaredSeasonWeeks };
+  }
+
+  /** One Stadium + one Center recurring clinic covering all occurrences on this weekday. */
+  if (n === 2) {
+    return { kind: "compact_series" };
+  }
 
   if (declaredOk) {
     const asCompactWeekly = declaredSeasonWeeks * 2;
@@ -1369,12 +1304,13 @@ function findSeasonHoldForStartMonday(
  * All reservation ids Club Locker holds for one league play day (Mon or Tue) in one season week.
  * - Full layout: 8 slots × 2 courts = 16 ids per day per week.
  * - Compact weekly: 2 ids (Stadium + Center) per day per booked week.
- * - Compact series: 2 ids total for that weekday (recurring series for the whole season block).
+ * - Combined two-court clinic: one Club Locker `id` per weekday per league week (same id covers both courts).
  *
  * When {@link courtSide} is set, only that court’s ids are returned (one id for compact layouts;
  * all Stadium or all Center slot-ids for the day in the full layout).
  */
 function getBulkDayReservationIds(
+  db: Db,
   hold: SeasonHoldRow,
   week: number,
   playDate: string,
@@ -1383,7 +1319,7 @@ function getBulkDayReservationIds(
   const mon = normalizeReservationIdListJson(hold.mondayReservationIdsJson);
   const tue = normalizeReservationIdListJson(hold.tuesdayReservationIdsJson);
   const shape = inferBulkHoldShape(mon, tue, hold.seasonWeeks);
-  const weekDates = seasonWeekPlayDates(hold.startMondayDate, week);
+  const weekDates = seasonWeekPlayDatesForDb(db, hold.startMondayDate, week);
   const day = playDayKindForDate(weekDates, playDate);
   if (!day) {
     return { error: "That date is not a play day for this league week." };
@@ -1391,7 +1327,9 @@ function getBulkDayReservationIds(
   const arr = day === "mon" ? mon : tue;
 
   const maxWeek =
-    shape.kind === "full" || shape.kind === "compact_weekly"
+    shape.kind === "full" ||
+    shape.kind === "compact_weekly" ||
+    shape.kind === "combined_clinic_per_week"
       ? Math.min(shape.weeks, hold.seasonWeeks)
       : hold.seasonWeeks;
 
@@ -1420,6 +1358,18 @@ function getBulkDayReservationIds(
       return { ids };
     }
     return { ids: chunk };
+  }
+
+  if (shape.kind === "combined_clinic_per_week") {
+    const id = arr[week - 1];
+    if (!id) {
+      return { error: "Missing reservation ids for this day in the local hold." };
+    }
+    /**
+     * Club Locker stores one reservation/clinic id for the whole two-court block that day.
+     * Per-court UI rows still delete via this id (clears the combined booking).
+     */
+    return { ids: [id] };
   }
 
   if (shape.kind === "compact_weekly") {
@@ -1464,10 +1414,11 @@ function getBulkDayReservationIds(
 }
 
 /**
- * Interleaved bulk layout: for each slot, ids are [Stadium/court1, Center/court2]
- * (see {@link mergeRecurringClinicInterleavedIds} when storing season bulk).
+ * Interleaved bulk layout: for each time slot, ids are [Stadium/court1, Center/court2]
+ * (matches {@link allBulkSlotsForSingleDay} slot order; season bulk stores one combined clinic per play day).
  */
 function getBulkReservationIdsForSlotFromHold(
+  db: Db,
   hold: SeasonHoldRow,
   week: number,
   playDate: string,
@@ -1495,7 +1446,7 @@ function getBulkReservationIdsForSlotFromHold(
   if (week < 1 || week > maxWeek) {
     return { error: "Week is outside this season block." };
   }
-  const weekDates = seasonWeekPlayDates(hold.startMondayDate, week);
+  const weekDates = seasonWeekPlayDatesForDb(db, hold.startMondayDate, week);
   const day = playDayKindForDate(weekDates, playDate);
   if (!day) {
     return { error: "That date is not a play day for this league week." };
@@ -1528,6 +1479,7 @@ function getBulkReservationIdsForSlotFromHold(
 }
 
 function resolveBulkReservationIdsForCancel(
+  db: Db,
   hold: SeasonHoldRow,
   week: number,
   date: string,
@@ -1538,7 +1490,7 @@ function resolveBulkReservationIdsForCancel(
   const mon = normalizeReservationIdListJson(hold.mondayReservationIdsJson);
   const tue = normalizeReservationIdListJson(hold.tuesdayReservationIdsJson);
   const shape = inferBulkHoldShape(mon, tue, hold.seasonWeeks);
-  const weekDates = seasonWeekPlayDates(hold.startMondayDate, week);
+  const weekDates = seasonWeekPlayDatesForDb(db, hold.startMondayDate, week);
   const day = playDayKindForDate(weekDates, date);
   if (!day) {
     return { error: "That date is not a play day for this league week." };
@@ -1546,9 +1498,10 @@ function resolveBulkReservationIdsForCancel(
 
   if (shape.kind === "full") {
     if (isFullBulkDaySpan(day, begin, end)) {
-      return getBulkDayReservationIds(hold, week, date, courtSide);
+      return getBulkDayReservationIds(db, hold, week, date, courtSide);
     }
     const slot = getBulkReservationIdsForSlotFromHold(
+      db,
       hold,
       week,
       date,
@@ -1565,11 +1518,15 @@ function resolveBulkReservationIdsForCancel(
    * series per weekday). There is no per-slot id — "replace green bulk" cancels the whole court
    * block for that day (test workflow), then books a single match.
    */
-  if (shape.kind === "compact_weekly" || shape.kind === "compact_series") {
-    return getBulkDayReservationIds(hold, week, date, courtSide);
+  if (
+    shape.kind === "compact_weekly" ||
+    shape.kind === "compact_series" ||
+    shape.kind === "combined_clinic_per_week"
+  ) {
+    return getBulkDayReservationIds(db, hold, week, date, courtSide);
   }
 
-  return getBulkDayReservationIds(hold, week, date, courtSide);
+  return getBulkDayReservationIds(db, hold, week, date, courtSide);
 }
 
 function stripReservationIdsFromSeasonHold(
@@ -1649,7 +1606,7 @@ export function getMatchReservationIdsForCalendarSlot(
     end: string;
   },
 ): { ids: string[] } | { error: string } {
-  const dates = seasonWeekPlayDates(input.startMondayDate, input.week);
+  const dates = seasonWeekPlayDatesForDb(db, input.startMondayDate, input.week);
   if (input.date !== dates.firstPlayDate && input.date !== dates.secondPlayDate) {
     return { error: "That date is not a play day for this league week." };
   }
@@ -1706,7 +1663,7 @@ function listMatchCancellableRowsForWeek(
   startMondayDate: string,
   week: number,
 ): CancellableCalendarRow[] {
-  const dates = seasonWeekPlayDates(startMondayDate, week);
+  const dates = seasonWeekPlayDatesForDb(db, startMondayDate, week);
   const preview = previewBooking(
     db,
     config,
@@ -1801,7 +1758,9 @@ export function listAllCancellableBookings(
 
   const shape = inferBulkHoldShape(mon, tue, hold.seasonWeeks);
   const bulkWeekCap =
-    shape.kind === "full" || shape.kind === "compact_weekly"
+    shape.kind === "full" ||
+    shape.kind === "compact_weekly" ||
+    shape.kind === "combined_clinic_per_week"
       ? Math.min(shape.weeks, hold.seasonWeeks)
       : hold.seasonWeeks;
 
@@ -1812,16 +1771,18 @@ export function listAllCancellableBookings(
       );
     } else if (hold.status === "active") {
       if (
-        (shape.kind === "full" || shape.kind === "compact_weekly") &&
+        (shape.kind === "full" ||
+          shape.kind === "compact_weekly" ||
+          shape.kind === "combined_clinic_per_week") &&
         week > bulkWeekCap
       ) {
         continue;
       }
-      const dates = seasonWeekPlayDates(startMondayDate, week);
+      const dates = seasonWeekPlayDatesForDb(db, startMondayDate, week);
       for (const day of ["mon", "tue"] as const) {
         const iso = day === "mon" ? dates.firstPlayDate : dates.secondPlayDate;
         const span = bulkHoldDaySpan(day);
-        const resolved = getBulkDayReservationIds(hold, week, iso);
+        const resolved = getBulkDayReservationIds(db, hold, week, iso);
         const complete = !("error" in resolved);
         const ids = complete ? resolved.ids : [];
         rows.push({
@@ -1914,6 +1875,7 @@ export async function cancelBookingCalendarItems(
   for (const item of unique) {
     if (item.kind === "bulk") {
       const r = resolveBulkReservationIdsForCancel(
+        db,
         hold,
         item.week,
         item.date,

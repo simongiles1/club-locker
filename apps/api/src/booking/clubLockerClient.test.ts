@@ -22,7 +22,17 @@ describe("extractReservationIdsFromClinicResponse", () => {
     ).toEqual(["a", "b", "3"]);
   });
 
+  it("falls back to top-level id when reservationIds is empty", () => {
+    expect(
+      extractReservationIdsFromClinicResponse({
+        id: 4728017,
+        reservationIds: [],
+      }),
+    ).toEqual(["4728017"]);
+  });
+
   it("returns empty for unknown", () => {
     expect(extractReservationIdsFromClinicResponse({})).toEqual([]);
   });
 });
+

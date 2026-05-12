@@ -227,13 +227,15 @@ export function Schedule({ embedded = false }: { embedded?: boolean }) {
   return (
     <div>
       {embedded ? null : <h1>Schedule</h1>}
-      <p className="schedule-lead">
-        Houseleague spring rotation. Set a season start date to show each
-        week&apos;s calendar date; pick Monday or Tuesday for that day&apos;s
-        timeslots. Monday night lists boxes 1–8; Tuesday lists boxes 9–16 (same
-        rotation pattern). The table shows matchups, byes, and which box is on
-        court at each time, for every week.
-      </p>
+      {embedded ? null : (
+        <p className="schedule-lead">
+          Houseleague spring rotation. Set a season start date to show each
+          week&apos;s calendar date; pick Monday or Tuesday for that day&apos;s
+          timeslots. Monday night lists boxes 1–8; Tuesday lists boxes 9–16 (same
+          rotation pattern). The table shows matchups, byes, and which box is on
+          court at each time, for every week.
+        </p>
+      )}
 
       <div className="card schedule-controls">
         <div className="schedule-controls-main">

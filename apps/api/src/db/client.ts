@@ -139,6 +139,12 @@ function migrateEmailTemplatesTable(sqlite: InstanceType<typeof Database>) {
     );
     CREATE INDEX IF NOT EXISTS email_templates_name_idx ON email_templates(name);
   `);
+  ensureColumn(
+    sqlite,
+    "email_templates",
+    "scope",
+    `scope text NOT NULL DEFAULT 'championships'`,
+  );
 }
 
 function ensureColumn(
@@ -154,6 +160,76 @@ function ensureColumn(
   if (!names.has(column)) {
     sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
   }
+}
+
+function migrateStatutoryHolidaysTable(sqlite: InstanceType<typeof Database>) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS statutory_holidays (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      date text NOT NULL,
+      open_time text,
+      close_time text,
+      closed integer NOT NULL DEFAULT 0,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS statutory_holidays_date_uidx
+      ON statutory_holidays(date);
+  `);
+}
+
+function migrateEmailOutboxAndHouseLeagueReminders(
+  sqlite: InstanceType<typeof Database>,
+) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS email_outbox (
+      id text PRIMARY KEY,
+      kind text NOT NULL,
+      season_id text REFERENCES seasons(id),
+      status text NOT NULL DEFAULT 'draft',
+      to_address text NOT NULL,
+      subject text NOT NULL,
+      body text NOT NULL,
+      meta_json text,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  ensureColumn(
+    sqlite,
+    "email_outbox",
+    "scheduled_send_at",
+    "scheduled_send_at text",
+  );
+
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS house_league_booked_occurrences (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      week_number integer NOT NULL,
+      play_date text NOT NULL,
+      slot text NOT NULL,
+      court_id integer NOT NULL,
+      box_number integer NOT NULL,
+      player1_id text NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+      player2_id text NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+      booking_run_id text,
+      reservation_id text,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS hl_occ_season_week_date_slot_box_uidx
+      ON house_league_booked_occurrences(
+        season_id, week_number, play_date, slot, court_id, box_number
+      );
+    CREATE TABLE IF NOT EXISTS house_league_match_reminder_sends (
+      id text PRIMARY KEY,
+      occurrence_id text NOT NULL REFERENCES house_league_booked_occurrences(id) ON DELETE CASCADE,
+      player_id text NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+      sent_at text NOT NULL,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS hl_rem_send_occ_player_uidx
+      ON house_league_match_reminder_sends(occurrence_id, player_id);
+  `);
 }
 
 function migrateAutomationTables(sqlite: InstanceType<typeof Database>) {
@@ -253,7 +329,9 @@ export function createDb(databaseUrl: string) {
   migrateSqliteSeasonsColumns(sqlite);
   migrateChampionshipTables(sqlite);
   migrateEmailTemplatesTable(sqlite);
+  migrateStatutoryHolidaysTable(sqlite);
   migrateAutomationTables(sqlite);
+  migrateEmailOutboxAndHouseLeagueReminders(sqlite);
   return drizzle(sqlite, { schema });
 }
 

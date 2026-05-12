@@ -1,9 +1,10 @@
 import {
   bulkHoldSlotsForWeekday,
   getWeekMatchups,
-  seasonWeekPlayDates,
-  statHolidayForDate,
+  seasonWeekPlayDatesWithRegistry,
+  statHolidayForDateInRegistry,
   statutoryHolidaysForYear,
+  type StatHoliday,
 } from "@squash/shared";
 import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import {
@@ -559,19 +560,10 @@ function formatISODate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-const WEEKS_TO_BOOK_CHOICES = [1, 2, 3, 4, 5, 6, 7, 8] as const;
-
-function labelWeeksToBook(n: number): string {
-  if (n === 1) return "First week only";
-  if (n === 8) return "All 8 weeks (incl. semi-finals)";
-  return `First ${n} weeks`;
-}
-
-/** Same choices, phrased for a sentence (e.g. after “covering …”). */
-function describeWeeksToBookInSentence(n: number): string {
-  if (n === 1) return "the first week only";
-  if (n === 8) return "all 8 play weeks (regular season through semi-finals)";
-  return `the first ${n} season weeks`;
+/** Label for a season week in bulk run UI (1-based week index). */
+function seasonBulkModalWeekLabel(weekNum: number): string {
+  if (weekNum === SEASON_BLOCK_CALENDAR_STEPS) return `Week ${weekNum} (Semi-finals)`;
+  return `Week ${weekNum}`;
 }
 
 /** "Jane Q. Doe" → first token + last token's first letter (for matchup chips). */
@@ -637,6 +629,7 @@ function SeasonBlockWeekCalendar({
   slotPlayerLabels,
   onBulkSlotContextMenu,
   onReservedSlotContextMenu,
+  statHolidayRegistry,
 }: {
   preview: SeasonBulkPreviewResponse;
   weekIndex: number;
@@ -655,6 +648,8 @@ function SeasonBlockWeekCalendar({
     slot: BulkSlotBookingRef,
     kind: "bulk" | "match",
   ) => void;
+  /** Dates and hours from /api/statutory-holidays (or fallback template). */
+  statHolidayRegistry: readonly StatHoliday[];
 }) {
   const monSlots = useMemo(() => bulkHoldSlotsForWeekday("mon"), []);
   const tueSlots = useMemo(() => bulkHoldSlotsForWeekday("tue"), []);
@@ -741,7 +736,11 @@ function SeasonBlockWeekCalendar({
     );
   }
 
-  const playDates = seasonWeekPlayDates(preview.startMondayDate, weekIndex + 1);
+  const playDates = seasonWeekPlayDatesWithRegistry(
+    preview.startMondayDate,
+    weekIndex + 1,
+    statHolidayRegistry,
+  );
   const playMonday = parseISODateLocal(playDates.weekMonday) ?? addDaysToDate(startMonday, weekIndex * 7);
   const firstPlayCol = playDates.shiftedByHoliday ? 2 : 1; // Tue when shifted, else Mon
   const secondPlayCol = playDates.shiftedByHoliday ? 3 : 2; // Wed when shifted, else Tue
@@ -780,16 +779,6 @@ function SeasonBlockWeekCalendar({
       month: "short",
       day: "numeric",
     });
-
-  const statutoryHoursThisYear = useMemo(
-    () =>
-      statutoryHolidaysForYear(playMonday.getFullYear()).map((h) => ({
-        label: h.name,
-        date: h.date,
-        hours: h.hours.closed ? "Closed" : `${h.hours.open}–${h.hours.close}`,
-      })),
-    [playMonday],
-  );
 
   return (
     <div className="season-bulk-cal">
@@ -919,7 +908,7 @@ function SeasonBlockWeekCalendar({
               {WEEK_SUN_FIRST.map((dowLabel, col) => {
                 const d = addDaysToDate(playMonday, col - 1);
                 const iso = formatISODate(d);
-                const holiday = statHolidayForDate(iso);
+                const holiday = statHolidayForDateInRegistry(iso, statHolidayRegistry);
                 const active = col === firstPlayCol || col === secondPlayCol;
                 const slots = col === firstPlayCol ? monSlots : col === secondPlayCol ? tueSlots : [];
                 const holidayCloseMinutes = holiday?.hours.close
@@ -1191,18 +1180,11 @@ function SeasonBlockWeekCalendar({
         </div>
       </div>
 
-      <p className="weekly-meta" style={{ marginBottom: 0, marginTop: "0.75rem" }}>
-        {playDates.shiftedByHoliday
-          ? `This week is shifted to Tuesday/Wednesday because ${playDates.holidayName} falls on Monday. `
-          : ""}
-        Run uses <code>{preview.bff.method}</code> <code>{preview.bff.path}</code> with{" "}
-        <code>confirm: true</code> and the same start Monday and “weeks to book” as the form
-        above.
-      </p>
-      <p className="weekly-meta" style={{ marginBottom: 0, marginTop: "0.5rem" }}>
-        Statutory holiday hours:{" "}
-        {statutoryHoursThisYear.map((h) => `${h.label} (${h.date}: ${h.hours})`).join(" · ")}
-      </p>
+      {playDates.shiftedByHoliday ? (
+        <p className="weekly-meta" style={{ marginBottom: 0, marginTop: "0.75rem" }}>
+          This week is shifted to Tuesday/Wednesday because {playDates.holidayName} falls on Monday.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -1219,7 +1201,8 @@ export function BookingPage({
 }) {
   const [startMondayForSeason, setStartMondayForSeason] = useState("");
   const [weeksToBook, setWeeksToBook] = useState<number>(8);
-  const [confirmSeasonBulk, setConfirmSeasonBulk] = useState(false);
+  const [seasonBulkRunModalOpen, setSeasonBulkRunModalOpen] = useState(false);
+  const [seasonBulkRunDraftWeeks, setSeasonBulkRunDraftWeeks] = useState(8);
   const [seasonBlockBooked, setSeasonBlockBooked] = useState(false);
   const [activeSeasonHold, setActiveSeasonHold] = useState<{
     id: string;
@@ -1251,8 +1234,85 @@ export function BookingPage({
   );
   const [seasonCalendarWeekIndex, setSeasonCalendarWeekIndex] = useState(0);
   const calendarWeekNumber = seasonCalendarWeekIndex + 1;
+  const [apiHolidayRegistry, setApiHolidayRegistry] = useState<
+    StatHoliday[] | undefined
+  >(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        type HRow = {
+          id: string;
+          name: string;
+          date: string;
+          hours: {
+            open: string | null;
+            close: string | null;
+            closed: boolean;
+          };
+        };
+        const rows = await api<HRow[]>("/api/statutory-holidays");
+        if (cancelled) return;
+        setApiHolidayRegistry(
+          rows.map((r) => ({
+            name: r.name,
+            date: r.date,
+            hours: {
+              open: r.hours.open,
+              close: r.hours.close,
+              closed: r.hours.closed,
+            },
+          })),
+        );
+      } catch {
+        if (!cancelled) setApiHolidayRegistry(undefined);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const fallbackHolidayRegistry = useMemo(() => {
+    const sm = parseISODateLocal(startMondayForSeason);
+    const y0 = sm?.getFullYear() ?? new Date().getFullYear();
+    const byDate = new Map<string, StatHoliday>();
+    for (const y of [y0 - 1, y0, y0 + 1]) {
+      for (const h of statutoryHolidaysForYear(y)) {
+        byDate.set(h.date, h);
+      }
+    }
+    return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  }, [startMondayForSeason]);
+
+  const holidayRegistry = apiHolidayRegistry ?? fallbackHolidayRegistry;
   const bulkWeekConvertedToMatches = Boolean(
     activeSeasonHold?.convertedWeeks?.includes(calendarWeekNumber),
+  );
+
+  /** Weeks still covered by an active bulk hold (not converted) cannot be unchecked in a new run. */
+  const minBulkRunDraftWeeks = useMemo(() => {
+    if (!activeSeasonHold || activeSeasonHold.status !== "active") return 0;
+    let max = 0;
+    for (let w = 1; w <= SEASON_BLOCK_CALENDAR_STEPS; w++) {
+      if (
+        w <= activeSeasonHold.seasonWeeks &&
+        !activeSeasonHold.convertedWeeks.includes(w)
+      ) {
+        max = w;
+      }
+    }
+    return max;
+  }, [activeSeasonHold]);
+
+  const isBulkWeekStillHeld = useCallback(
+    (weekNum: number) => {
+      if (!activeSeasonHold || activeSeasonHold.status !== "active") return false;
+      if (weekNum > activeSeasonHold.seasonWeeks) return false;
+      return !activeSeasonHold.convertedWeeks.includes(weekNum);
+    },
+    [activeSeasonHold],
   );
 
   const [viewedWeekPreview, setViewedWeekPreview] = useState<PreviewResult | null>(
@@ -1264,6 +1324,10 @@ export function BookingPage({
     kind: "ok" | "error";
     message: string;
   } | null>(null);
+  const [convertWeeksModalOpen, setConvertWeeksModalOpen] = useState(false);
+  const [convertWeeksModalSelected, setConvertWeeksModalSelected] = useState<
+    Set<number>
+  >(() => new Set());
 
   const slotContextMenuRef = useRef<HTMLDivElement | null>(null);
   const cancelBookingsSelectAllRef = useRef<HTMLInputElement | null>(null);
@@ -1381,6 +1445,34 @@ export function BookingPage({
   }, [cancelBookingsOpen]);
 
   useEffect(() => {
+    if (!seasonBulkRunModalOpen) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && !seasonBulkSubmitting) {
+        setSeasonBulkRunModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [seasonBulkRunModalOpen, seasonBulkSubmitting]);
+
+  useEffect(() => {
+    if (!convertWeeksModalOpen) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && !convertWeekLoading) {
+        setConvertWeeksModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [convertWeeksModalOpen, convertWeekLoading]);
+
+  useEffect(() => {
+    if (convertWeeksModalOpen && !hasActiveSeasonHoldForConvert) {
+      setConvertWeeksModalOpen(false);
+    }
+  }, [convertWeeksModalOpen, hasActiveSeasonHoldForConvert]);
+
+  useEffect(() => {
     if (!singleBookDraft) return;
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === "Escape") {
@@ -1418,7 +1510,11 @@ export function BookingPage({
       return;
     }
     const weekNumber = seasonCalendarWeekIndex + 1;
-    const dates = seasonWeekPlayDates(startMondayForSeason, weekNumber);
+    const dates = seasonWeekPlayDatesWithRegistry(
+      startMondayForSeason,
+      weekNumber,
+      holidayRegistry,
+    );
     const q = new URLSearchParams({
       mondayDate: dates.firstPlayDate,
       tuesdayDate: dates.secondPlayDate,
@@ -1446,7 +1542,7 @@ export function BookingPage({
     return () => {
       cancelled = true;
     };
-  }, [seasonId, startMondayForSeason, seasonCalendarWeekIndex]);
+  }, [seasonId, startMondayForSeason, seasonCalendarWeekIndex, holidayRegistry]);
 
   const refreshLocalSeasonHolds = useCallback(async () => {
     if (!seasonId || !startMondayForSeason) {
@@ -1529,6 +1625,210 @@ export function BookingPage({
   useEffect(() => {
     fetchSeasonBlockPreview().catch(() => {});
   }, [fetchSeasonBlockPreview]);
+
+  const toggleBulkRunDraftWeek = useCallback(
+    (w: number) => {
+      if (isBulkWeekStillHeld(w)) return;
+      const min = minBulkRunDraftWeeks;
+      setSeasonBulkRunDraftWeeks((draft) => {
+        if (w < draft) return Math.max(w - 1, min);
+        if (w === draft && draft > min) return w - 1;
+        if (w > draft) return w;
+        return draft;
+      });
+    },
+    [isBulkWeekStillHeld, minBulkRunDraftWeeks],
+  );
+
+  const openConvertWeeksModal = useCallback(() => {
+    if (!activeSeasonHold || activeSeasonHold.status !== "active") return;
+    const initial = new Set<number>();
+    for (let w = 1; w <= activeSeasonHold.seasonWeeks; w++) {
+      if (isBulkWeekStillHeld(w)) initial.add(w);
+    }
+    setConvertWeeksModalSelected(initial);
+    setConvertFeedback(null);
+    setConvertWeeksModalOpen(true);
+  }, [activeSeasonHold, isBulkWeekStillHeld]);
+
+  const toggleConvertWeeksModalWeek = useCallback(
+    (w: number) => {
+      if (!isBulkWeekStillHeld(w)) return;
+      setConvertWeeksModalSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(w)) next.delete(w);
+        else next.add(w);
+        return next;
+      });
+    },
+    [isBulkWeekStillHeld],
+  );
+
+  const submitConvertWeeksModal = useCallback(async () => {
+    if (!seasonId || !activeSeasonHoldId || !startMondayForSeason || !activeSeasonHold) {
+      return;
+    }
+    const seasonWeeks = activeSeasonHold.seasonWeeks;
+    const weeksToRun = [...convertWeeksModalSelected]
+      .filter((w) => w >= 1 && w <= seasonWeeks && isBulkWeekStillHeld(w))
+      .sort((a, b) => a - b);
+    if (weeksToRun.length === 0) {
+      setConvertFeedback({
+        kind: "error",
+        message: "Select at least one week that still has a bulk hold.",
+      });
+      return;
+    }
+    setConvertFeedback(null);
+    setConvertWeekLoading(true);
+    let stopMessage: string | null = null;
+    try {
+      for (const w of weeksToRun) {
+        const res = await api<ConvertResult>(
+          `/api/seasons/${seasonId}/booking/convert`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              week: w,
+              holdId: activeSeasonHoldId,
+              confirm: true,
+              notifyOnDelete: true,
+            }),
+          },
+        );
+        onLog(JSON.stringify(res, null, 2));
+        if (res.status !== "ok" && res.status !== "partial") {
+          stopMessage = res.message;
+          break;
+        }
+      }
+      await refreshLocalSeasonHolds();
+      const viewedWeek = seasonCalendarWeekIndex + 1;
+      if (weeksToRun.includes(viewedWeek)) {
+        const dates = seasonWeekPlayDatesWithRegistry(
+          startMondayForSeason,
+          viewedWeek,
+          holidayRegistry,
+        );
+        const q = new URLSearchParams({
+          mondayDate: dates.firstPlayDate,
+          tuesdayDate: dates.secondPlayDate,
+        });
+        const prev = await api<PreviewResult | { error: string }>(
+          `/api/seasons/${seasonId}/booking/weeks/${viewedWeek}/preview?${q.toString()}`,
+        );
+        setViewedWeekPreview(prev);
+      }
+      if (stopMessage) {
+        setConvertFeedback({ kind: "error", message: stopMessage });
+      } else {
+        setConvertFeedback({
+          kind: "ok",
+          message:
+            weeksToRun.length === 1
+              ? "Conversion complete for the selected week."
+              : `Successfully converted ${weeksToRun.length} weeks to match bookings.`,
+        });
+      }
+      setConvertWeeksModalOpen(false);
+    } catch (e) {
+      const msg = String(e);
+      onLog(msg);
+      setConvertFeedback({ kind: "error", message: msg });
+      await refreshLocalSeasonHolds();
+    } finally {
+      setConvertWeekLoading(false);
+    }
+  }, [
+    seasonId,
+    activeSeasonHoldId,
+    startMondayForSeason,
+    activeSeasonHold,
+    convertWeeksModalSelected,
+    isBulkWeekStillHeld,
+    seasonCalendarWeekIndex,
+    holidayRegistry,
+    onLog,
+    refreshLocalSeasonHolds,
+  ]);
+
+  const runSeasonBulkSubmit = useCallback(
+    async (selectedSeasonWeeks: number) => {
+      if (seasonBulkRunInFlightRef.current) return;
+      seasonBulkRunInFlightRef.current = true;
+      setSeasonBulkSubmitting(true);
+      setSeasonBulkFeedback(null);
+      setLastSeasonBulkApiResponse(null);
+      setCopySeasonBulkResponseStatus(null);
+      setWeeksToBook(selectedSeasonWeeks);
+      try {
+        const res = await api<SeasonBulkResult>(
+          `/api/seasons/${seasonId}/booking/season-bulk`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              startMondayDate: startMondayForSeason,
+              seasonWeeks: selectedSeasonWeeks,
+              confirm: true,
+            }),
+          },
+        );
+        onLog(JSON.stringify(res, null, 2));
+        setLastSeasonBulkApiResponse(res);
+        const holdPersisted =
+          Boolean(res.seasonHoldId) &&
+          (res.idempotent || res.status === "ok" || res.status === "partial");
+        if (holdPersisted && res.seasonHoldId) {
+          setSeasonBlockBooked(true);
+          setActiveSeasonHold({
+            id: res.seasonHoldId,
+            seasonWeeks: selectedSeasonWeeks,
+            status: "active",
+            convertedWeeks: [],
+          });
+        }
+        await refreshLocalSeasonHolds();
+        if (res.idempotent) {
+          setSeasonBulkFeedback({
+            kind: "idempotent",
+            message: res.message,
+          });
+          return;
+        }
+        if (!res.idempotent && res.status === "ok") {
+          setSeasonBulkFeedback({
+            kind: "success",
+            message:
+              "Season block run finished with status ok. Local reservation ids are stored for weekly conversion.",
+          });
+        } else if (res.status === "error" || res.status === "partial") {
+          setSeasonBulkFeedback({
+            kind: "error",
+            message: res.message,
+            slotConflict: Boolean(res.conflict),
+          });
+        }
+      } catch (e) {
+        const msg = String(e);
+        onLog(msg);
+        setLastSeasonBulkApiResponse({ error: msg });
+        setCopySeasonBulkResponseStatus(null);
+        setSeasonBulkFeedback({
+          kind: "error",
+          message: msg,
+        });
+      } finally {
+        seasonBulkRunInFlightRef.current = false;
+        setSeasonBulkSubmitting(false);
+      }
+    },
+    [
+      seasonId,
+      startMondayForSeason,
+      onLog,
+      refreshLocalSeasonHolds,
+    ],
+  );
 
   const openCancelBookingsModal = useCallback(async () => {
     if (!seasonId || !startMondayForSeason) return;
@@ -1720,26 +2020,12 @@ export function BookingPage({
             >
               <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
                 <label>
-                  First Monday of season (ISO){" "}
+                  First Monday of season{" "}
                   <input
                     value={startMondayForSeason}
                     onChange={(e) => setStartMondayForSeason(e.target.value)}
                     size={12}
                   />
-                </label>
-                <label>
-                  Weeks to book{" "}
-                  <select
-                    value={weeksToBook}
-                    onChange={(e) => setWeeksToBook(Number(e.target.value))}
-                    aria-label="Number of season weeks to include in this bulk block"
-                  >
-                    {WEEKS_TO_BOOK_CHOICES.map((n) => (
-                      <option key={n} value={n}>
-                        {labelWeeksToBook(n)}
-                      </option>
-                    ))}
-                  </select>
                 </label>
               </div>
               <div className="row" style={{ flexShrink: 0 }}>
@@ -1800,6 +2086,7 @@ export function BookingPage({
                   slotPlayerLabels={slotPlayerLabelsForCalendar}
                   onBulkSlotContextMenu={openBulkSlotContextMenu}
                   onReservedSlotContextMenu={openReservedSlotContextMenu}
+                  statHolidayRegistry={holidayRegistry}
                 />
                 <p className="weekly-meta" style={{ marginTop: "0.5rem", marginBottom: 0 }}>
                   Tip: <strong>Right-click</strong> empty areas or blue preview blocks to{" "}
@@ -1828,15 +2115,6 @@ export function BookingPage({
                 Loading week plan for calendar labels…
               </p>
             ) : null}
-            <label style={{ display: "block", marginTop: "0.75rem" }}>
-              <input
-                type="checkbox"
-                checked={confirmSeasonBulk}
-                onChange={(e) => setConfirmSeasonBulk(e.target.checked)}
-              />{" "}
-              I understand this will create one clinic per court for each play day/week on the
-              club, covering {describeWeeksToBookInSentence(weeksToBook)}.
-            </label>
             {seasonBulkFeedback ? (
               <div
                 className={
@@ -1859,162 +2137,29 @@ export function BookingPage({
                 {seasonBulkFeedback.message}
               </div>
             ) : null}
-            <p className="booking-bulk-hint" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
-              Green slots mean this app has a stored bulk season block for that time (SQLite). Violet
-              slots are weeks already converted to match reservations. If you removed the clinics in
-              Club Locker, use{" "}
-              <strong>Remove local season hold</strong> so a new run is allowed. If the API
-              still reports a conflict, something is still on the club schedule in Club Locker
-              (other clinics, one-off games, or the other court)—remove those and try again.
-            </p>
             <div className="row" style={{ marginTop: "0.5rem" }}>
               <button
                 type="button"
                 className="primary"
-                disabled={
-                  !seasonId ||
-                  !startMondayForSeason ||
-                  !confirmSeasonBulk ||
-                  seasonBulkSubmitting
-                }
-                aria-busy={seasonBulkSubmitting}
-                onClick={async () => {
-                  if (seasonBulkRunInFlightRef.current) return;
-                  seasonBulkRunInFlightRef.current = true;
-                  setSeasonBulkSubmitting(true);
-                  setSeasonBulkFeedback(null);
-                  setLastSeasonBulkApiResponse(null);
-                  setCopySeasonBulkResponseStatus(null);
-                  try {
-                    const res = await api<SeasonBulkResult>(
-                      `/api/seasons/${seasonId}/booking/season-bulk`,
-                      {
-                        method: "POST",
-                        body: JSON.stringify({
-                          startMondayDate: startMondayForSeason,
-                          seasonWeeks: weeksToBook,
-                          confirm: true,
-                        }),
-                      },
-                    );
-                    onLog(JSON.stringify(res, null, 2));
-                    setLastSeasonBulkApiResponse(res);
-                    const holdPersisted =
-                      Boolean(res.seasonHoldId) &&
-                      (res.idempotent ||
-                        res.status === "ok" ||
-                        res.status === "partial");
-                    if (holdPersisted && res.seasonHoldId) {
-                      setSeasonBlockBooked(true);
-                      setActiveSeasonHold({
-                        id: res.seasonHoldId,
-                        seasonWeeks: weeksToBook,
-                        status: "active",
-                        convertedWeeks: [],
-                      });
-                    }
-                    await refreshLocalSeasonHolds();
-                    if (res.idempotent) {
-                      setSeasonBulkFeedback({
-                        kind: "idempotent",
-                        message: res.message,
-                      });
-                      return;
-                    }
-                    if (!res.idempotent && res.status === "ok") {
-                      setSeasonBulkFeedback({
-                        kind: "success",
-                        message:
-                          "Season block run finished with status ok. Local reservation ids are stored for weekly conversion.",
-                      });
-                    } else if (res.status === "error" || res.status === "partial") {
-                      setSeasonBulkFeedback({
-                        kind: "error",
-                        message: res.message,
-                        slotConflict: Boolean(res.conflict),
-                      });
-                    }
-                  } catch (e) {
-                    const msg = String(e);
-                    onLog(msg);
-                    setLastSeasonBulkApiResponse({ error: msg });
-                    setCopySeasonBulkResponseStatus(null);
-                    setSeasonBulkFeedback({
-                      kind: "error",
-                      message: msg,
-                    });
-                  } finally {
-                    seasonBulkRunInFlightRef.current = false;
-                    setSeasonBulkSubmitting(false);
-                  }
+                disabled={!seasonId || !startMondayForSeason || seasonBulkSubmitting}
+                onClick={() => {
+                  setSeasonBulkRunDraftWeeks(
+                    Math.max(weeksToBook, minBulkRunDraftWeeks),
+                  );
+                  setSeasonBulkRunModalOpen(true);
                 }}
               >
-                {seasonBulkSubmitting ? (
-                  <span className="booking-async-btn-inner">
-                    <Loader2 className="booking-async-spinner" size={13} aria-hidden strokeWidth={2} />
-                    Running…
-                  </span>
-                ) : (
-                  "Run season block (bulk)"
-                )}
+                Run season block (bulk)
               </button>
               {hasActiveSeasonHoldForConvert && activeSeasonHoldId ? (
                 <button
                   type="button"
                   className="secondary"
                   disabled={!seasonId || convertWeekLoading || !activeSeasonHoldId}
-                  title={`Convert season week ${seasonCalendarWeekIndex + 1} only (delete bulk clinics for this week, create match reservations).`}
-                  onClick={async () => {
-                    const w = seasonCalendarWeekIndex + 1;
-                    if (
-                      !window.confirm(
-                        `Convert season week ${w}? This deletes the bulk block reservations for this week in Club Locker and creates individual match bookings with players from the week plan.`,
-                      )
-                    ) {
-                      return;
-                    }
-                    setConvertFeedback(null);
-                    setConvertWeekLoading(true);
-                    try {
-                      const res = await api<ConvertResult>(
-                        `/api/seasons/${seasonId}/booking/convert`,
-                        {
-                          method: "POST",
-                          body: JSON.stringify({
-                            week: w,
-                            holdId: activeSeasonHoldId,
-                            confirm: true,
-                            notifyOnDelete: true,
-                          }),
-                        },
-                      );
-                      onLog(JSON.stringify(res, null, 2));
-                      setConvertFeedback({
-                        kind: res.status === "ok" || res.status === "partial" ? "ok" : "error",
-                        message: res.message,
-                      });
-                      void refreshLocalSeasonHolds();
-                      const dates = seasonWeekPlayDates(startMondayForSeason, w);
-                      const q = new URLSearchParams({
-                        mondayDate: dates.firstPlayDate,
-                        tuesdayDate: dates.secondPlayDate,
-                      });
-                      const prev = await api<PreviewResult | { error: string }>(
-                        `/api/seasons/${seasonId}/booking/weeks/${w}/preview?${q.toString()}`,
-                      );
-                      setViewedWeekPreview(prev);
-                    } catch (e) {
-                      const msg = String(e);
-                      onLog(msg);
-                      setConvertFeedback({ kind: "error", message: msg });
-                    } finally {
-                      setConvertWeekLoading(false);
-                    }
-                  }}
+                  title="Choose which season weeks to convert from bulk clinics to individual match bookings."
+                  onClick={openConvertWeeksModal}
                 >
-                  {convertWeekLoading
-                    ? "Converting week…"
-                    : `Convert week ${seasonCalendarWeekIndex + 1} to matches`}
+                  {convertWeekLoading ? "Converting weeks…" : "Convert weeks to matches"}
                 </button>
               ) : null}
               <button
@@ -2076,32 +2221,6 @@ export function BookingPage({
                 }}
               >
                 Remove local season hold
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={!seasonId}
-                onClick={async () => {
-                  const list = await api<unknown[]>(
-                    `/api/seasons/${seasonId}/booking/holds`,
-                  );
-                  onLog(JSON.stringify(list, null, 2));
-                }}
-              >
-                List per-week holds (legacy)
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={!seasonId}
-                onClick={async () => {
-                  const list = await api<unknown[]>(
-                    `/api/seasons/${seasonId}/booking/runs`,
-                  );
-                  onLog(JSON.stringify(list, null, 2));
-                }}
-              >
-                List runs
               </button>
             </div>
             {convertFeedback ? (
@@ -2304,6 +2423,271 @@ export function BookingPage({
               Cancel match bookings (both courts)…
             </button>
           ) : null}
+        </div>
+      ) : null}
+
+      {seasonBulkRunModalOpen ? (
+        <div
+          className="booking-single-match-backdrop"
+          role="presentation"
+          onMouseDown={(ev) => {
+            if (ev.target === ev.currentTarget && !seasonBulkSubmitting) {
+              setSeasonBulkRunModalOpen(false);
+            }
+          }}
+        >
+          <div
+            className="booking-single-match-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="booking-season-bulk-run-title"
+            style={{ maxWidth: "28rem" }}
+          >
+            <h3 id="booking-season-bulk-run-title" style={{ marginTop: 0 }}>
+              Run season block (bulk)
+            </h3>
+            <p className="weekly-meta" style={{ marginTop: 0 }}>
+              This creates one clinic per court for each play day in the weeks you include. Selection
+              is consecutive from week 1 through the last week you check. Weeks that still have an
+              active bulk hold are selected and cannot be changed.
+            </p>
+            <ul
+              style={{
+                listStyle: "none",
+                padding: 0,
+                margin: "0.5rem 0",
+                border: "1px solid var(--border, #e2e8f0)",
+                borderRadius: 8,
+              }}
+            >
+              {Array.from(
+                { length: SEASON_BLOCK_CALENDAR_STEPS },
+                (_, i) => i + 1,
+              ).map((w) => {
+                const held = isBulkWeekStillHeld(w);
+                const checked = held || w <= seasonBulkRunDraftWeeks;
+                return (
+                  <li
+                    key={w}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.45rem",
+                      padding: "0.2rem 0.5rem",
+                      borderBottom: "1px solid var(--border, #e2e8f0)",
+                      background: held ? "rgba(148,163,184,0.1)" : undefined,
+                    }}
+                  >
+                    <input
+                      id={`bulk-run-week-${w}`}
+                      type="checkbox"
+                      checked={checked}
+                      disabled={held || seasonBulkSubmitting}
+                      onChange={() => toggleBulkRunDraftWeek(w)}
+                    />
+                    <label
+                      htmlFor={`bulk-run-week-${w}`}
+                      style={{
+                        margin: 0,
+                        flex: 1,
+                        minWidth: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "0.5rem",
+                        cursor:
+                          held || seasonBulkSubmitting ? "not-allowed" : "pointer",
+                        fontSize: "0.9rem",
+                      }}
+                    >
+                      <span
+                        style={{
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {seasonBulkModalWeekLabel(w)}
+                      </span>
+                      {held ? (
+                        <span
+                          className="weekly-meta"
+                          style={{ flexShrink: 0, whiteSpace: "nowrap", fontSize: "0.8rem" }}
+                        >
+                          Already blocked (bulk hold).
+                        </span>
+                      ) : null}
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="booking-single-match-actions">
+              <button
+                type="button"
+                className="secondary"
+                disabled={seasonBulkSubmitting}
+                onClick={() => setSeasonBulkRunModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={
+                  seasonBulkSubmitting ||
+                  seasonBulkRunDraftWeeks < Math.max(1, minBulkRunDraftWeeks)
+                }
+                aria-busy={seasonBulkSubmitting}
+                onClick={async () => {
+                  await runSeasonBulkSubmit(seasonBulkRunDraftWeeks);
+                  setSeasonBulkRunModalOpen(false);
+                }}
+              >
+                {seasonBulkSubmitting ? (
+                  <span className="booking-async-btn-inner">
+                    <Loader2 className="booking-async-spinner" size={13} aria-hidden strokeWidth={2} />
+                    Running…
+                  </span>
+                ) : (
+                  "Confirm"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {convertWeeksModalOpen && activeSeasonHold && activeSeasonHoldId ? (
+        <div
+          className="booking-single-match-backdrop"
+          role="presentation"
+          onMouseDown={(ev) => {
+            if (ev.target === ev.currentTarget && !convertWeekLoading) {
+              setConvertWeeksModalOpen(false);
+            }
+          }}
+        >
+          <div
+            className="booking-single-match-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="booking-convert-weeks-title"
+            style={{ maxWidth: "28rem" }}
+          >
+            <h3 id="booking-convert-weeks-title" style={{ marginTop: 0 }}>
+              Convert weeks to match bookings
+            </h3>
+            <p className="weekly-meta" style={{ marginTop: 0 }}>
+              For each week you select, this deletes that week&apos;s bulk block reservations in Club
+              Locker and creates individual match reservations from the week plan. Weeks already
+              converted are shown for reference only.
+            </p>
+            <ul
+              style={{
+                listStyle: "none",
+                padding: 0,
+                margin: "0.5rem 0",
+                border: "1px solid var(--border, #e2e8f0)",
+                borderRadius: 8,
+              }}
+            >
+              {Array.from({ length: activeSeasonHold.seasonWeeks }, (_, i) => i + 1).map((w) => {
+                const converted = activeSeasonHold.convertedWeeks.includes(w);
+                const stillHeld = isBulkWeekStillHeld(w);
+                const checked = stillHeld && convertWeeksModalSelected.has(w);
+                return (
+                  <li
+                    key={w}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.45rem",
+                      padding: "0.2rem 0.5rem",
+                      borderBottom: "1px solid var(--border, #e2e8f0)",
+                      background: converted ? "rgba(148,163,184,0.1)" : undefined,
+                    }}
+                  >
+                    <input
+                      id={`convert-week-${w}`}
+                      type="checkbox"
+                      checked={checked}
+                      disabled={converted || !stillHeld || convertWeekLoading}
+                      onChange={() => toggleConvertWeeksModalWeek(w)}
+                    />
+                    <label
+                      htmlFor={`convert-week-${w}`}
+                      style={{
+                        margin: 0,
+                        flex: 1,
+                        minWidth: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "0.5rem",
+                        cursor:
+                          converted || !stillHeld || convertWeekLoading
+                            ? "not-allowed"
+                            : "pointer",
+                        fontSize: "0.9rem",
+                      }}
+                    >
+                      <span
+                        style={{
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {seasonBulkModalWeekLabel(w)}
+                      </span>
+                      {converted ? (
+                        <span
+                          className="weekly-meta"
+                          style={{ flexShrink: 0, whiteSpace: "nowrap", fontSize: "0.8rem" }}
+                        >
+                          Already converted
+                        </span>
+                      ) : null}
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="booking-single-match-actions">
+              <button
+                type="button"
+                className="secondary"
+                disabled={convertWeekLoading}
+                onClick={() => setConvertWeeksModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={
+                  convertWeekLoading ||
+                  ![...convertWeeksModalSelected].some((w) => isBulkWeekStillHeld(w))
+                }
+                aria-busy={convertWeekLoading}
+                onClick={() => {
+                  void submitConvertWeeksModal();
+                }}
+              >
+                {convertWeekLoading ? (
+                  <span className="booking-async-btn-inner">
+                    <Loader2 className="booking-async-spinner" size={13} aria-hidden strokeWidth={2} />
+                    Converting…
+                  </span>
+                ) : (
+                  "Convert selected"
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
 

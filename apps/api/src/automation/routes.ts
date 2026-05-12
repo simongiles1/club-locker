@@ -7,6 +7,7 @@ import type { EmailAdapter } from "../adapters/email.js";
 import type { AiAgent } from "./aiAgent.js";
 import { approveInboundAction, rejectInboundAction } from "./applyAction.js";
 import { advanceClockMs, readClockState, setClockIso } from "./clock.js";
+import { seedHouseLeagueEmailReminderSettings } from "../houseLeague/emailReminderSettings.js";
 import { getExecutionDetail, listExecutions } from "./executions.js";
 import { processInboundEmail } from "./inbound.js";
 import type { ImapAutomationPoller } from "./imapPoller.js";
@@ -38,6 +39,7 @@ export function registerAutomationRoutes(
 ): void {
   const { db, config, emailAdapter, aiAgent, poller } = deps;
   seedAutomationSettings(db);
+  seedHouseLeagueEmailReminderSettings(db);
 
   app.get("/api/automation/settings", async () => ({
     testMode: getSetting(db, "automation.test_mode", "off"),

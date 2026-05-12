@@ -5,7 +5,6 @@ import {
   seasonStartMondayLocal,
   type BookingCalendarSeason,
 } from "@squash/shared";
-import { api } from "./api.js";
 import { ChampionshipsPage } from "./ChampionshipsPage.js";
 import { HouseleaguePage } from "./HouseleaguePage.js";
 import { MembersPage } from "./MembersPage.js";
@@ -72,16 +71,13 @@ function distinctClubYearsDescending(seasons: Season[]): number[] {
   }
   return [...ys].sort((a, b) => b - a);
 }
-type Tab =
-  | "overview"
-  | "registration"
-  | "houseleague"
-  | "championships"
-  | "phase2"
-  | "members";
+type Tab = "houseleague" | "championships" | "members";
+
+/** Members tab still renders when active; toggle to show the nav link again. */
+const SHOW_MEMBERS_IN_NAV = false;
 
 export function App() {
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>("houseleague");
   const [seasons, setSeasons] = useState<Season[]>([]);
   const [seasonId, setSeasonId] = useState<string>("");
   const setLog = useCallback((_msg: string) => {
@@ -119,21 +115,25 @@ export function App() {
     if (canon && canon !== seasonId) setSeasonId(canon);
   }, [tab, seasonId, seasons]);
 
+  const seasonSelectorOnly = (
+    <label>
+      Season{" "}
+      <select
+        value={seasonId}
+        onChange={(e) => setSeasonId(e.target.value)}
+      >
+        {seasons.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.name} ({s.status})
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
   const seasonSelectControls = (
     <>
-      <label>
-        Season{" "}
-        <select
-          value={seasonId}
-          onChange={(e) => setSeasonId(e.target.value)}
-        >
-          {seasons.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name} ({s.status})
-            </option>
-          ))}
-        </select>
-      </label>
+      {seasonSelectorOnly}
       <button type="button" className="secondary" onClick={refreshSeasons}>
         Refresh
       </button>
@@ -144,46 +144,8 @@ export function App() {
   const championshipYearForSeasonId =
     seasons.find((x) => x.id === seasonId)?.clubYear ?? null;
 
-  const championshipsYearControls = (
-    <>
-      <label>
-        Year{" "}
-        <select
-          value={
-            championshipYearForSeasonId != null
-              ? String(championshipYearForSeasonId)
-              : ""
-          }
-          onChange={(e) => {
-            const raw = e.target.value;
-            if (!raw) return;
-            const year = Number(raw);
-            if (!Number.isFinite(year)) return;
-            const id = canonicalSeasonIdForClubYear(seasons, year);
-            if (id) setSeasonId(id);
-          }}
-        >
-          {championshipYears.length === 0 ? (
-            <option value="">No club-booking years</option>
-          ) : null}
-          {championshipYearForSeasonId == null && championshipYears.length > 0 ? (
-            <option value="">— pick year —</option>
-          ) : null}
-          {championshipYears.map((y) => (
-            <option key={y} value={String(y)}>
-              {y}
-            </option>
-          ))}
-        </select>
-      </label>
-      <button type="button" className="secondary" onClick={refreshSeasons}>
-        Refresh
-      </button>
-    </>
-  );
-
   const headerSeasonControls =
-    tab === "championships" ? championshipsYearControls : seasonSelectControls;
+    tab === "championships" ? null : seasonSelectControls;
 
   const selectedSeason =
     seasons.find((x) => x.id === seasonId) ?? null;
@@ -195,21 +157,7 @@ export function App() {
       }
     >
       <nav>
-        <strong>Director</strong>
-        <button
-          type="button"
-          className={tab === "overview" ? "active" : ""}
-          onClick={() => setTab("overview")}
-        >
-          Overview
-        </button>
-        <button
-          type="button"
-          className={tab === "registration" ? "active" : ""}
-          onClick={() => setTab("registration")}
-        >
-          Registration
-        </button>
+        <strong>CL Automation</strong>
         <button
           type="button"
           className={tab === "houseleague" ? "active" : ""}
@@ -224,38 +172,29 @@ export function App() {
         >
           Championships
         </button>
-        <button
-          type="button"
-          className={tab === "members" ? "active" : ""}
-          onClick={() => setTab("members")}
-        >
-          Members
-        </button>
-        <button
-          type="button"
-          className={tab === "phase2" ? "active" : ""}
-          onClick={() => setTab("phase2")}
-        >
-          Phase 2
-        </button>
+        {SHOW_MEMBERS_IN_NAV ? (
+          <button
+            type="button"
+            className={tab === "members" ? "active" : ""}
+            onClick={() => setTab("members")}
+          >
+            Members
+          </button>
+        ) : null}
       </nav>
       <main className={tab === "members" ? "main--fill-viewport" : undefined}>
-        {tab === "houseleague" ? null : (
+        {tab === "houseleague" ? null : headerSeasonControls != null ? (
           <div className="row" style={{ marginBottom: "1rem" }}>
             {headerSeasonControls}
           </div>
-        )}
-        {tab === "overview" && (
-          <Overview seasonId={seasonId} onLog={setLog} />
-        )}
-        {tab === "registration" && <Registration onLog={setLog} />}
+        ) : null}
         {tab === "houseleague" && (
           <HouseleaguePage
             seasonId={seasonId}
             seasonStartMondayISO={
               selectedSeason ? startMondayForSeasonRow(selectedSeason) : ""
             }
-            seasonControls={seasonSelectControls}
+            bookingSeasonControls={seasonSelectorOnly}
             onLog={setLog}
           />
         )}
@@ -263,146 +202,15 @@ export function App() {
           <ChampionshipsPage
             seasonId={seasonId}
             clubYear={championshipYearForSeasonId}
+            championshipYears={championshipYears}
+            onSelectClubYear={(year) => {
+              const id = canonicalSeasonIdForClubYear(seasons, year);
+              if (id) setSeasonId(id);
+            }}
           />
         )}
         {tab === "members" && <MembersPage />}
-        {tab === "phase2" && <Phase2 seasonId={seasonId} onLog={setLog} />}
       </main>
-    </div>
-  );
-}
-
-function Overview({
-  seasonId,
-  onLog,
-}: {
-  seasonId: string;
-  onLog: (s: string) => void;
-}) {
-  return (
-    <div>
-      <h1>Overview</h1>
-      <p>
-        Local-first director dashboard. Run API on port 3001; this UI proxies{" "}
-        <code>/api</code>.
-      </p>
-      <div className="card">
-        <div className="row">
-          <button
-            type="button"
-            className="primary"
-            disabled={!seasonId}
-            onClick={async () => {
-              const res = await api<unknown>(`/api/seasons/${seasonId}/sync`, {
-                method: "POST",
-              });
-              onLog(JSON.stringify(res, null, 2));
-            }}
-          >
-            Sync Now (Club Locker mock)
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Registration({ onLog }: { onLog: (s: string) => void }) {
-  return (
-    <div>
-      <h1>Registration queue</h1>
-      <div className="card row">
-        <button
-          type="button"
-          className="secondary"
-          onClick={async () => {
-            const rows = await api<unknown[]>("/api/registration-queue");
-            onLog(JSON.stringify(rows, null, 2));
-          }}
-        >
-          Load queue
-        </button>
-      </div>
-      <div className="card">
-        <p>Simulate opt-in (uses player email in mock roster)</p>
-        <button
-          type="button"
-          className="primary"
-          onClick={async () => {
-            const res = await api<unknown>("/api/registration-queue", {
-              method: "POST",
-              body: JSON.stringify({
-                kind: "opt_in",
-                fromEmail: "player1@example.test",
-                parsedName: "Player 1",
-              }),
-            });
-            onLog(JSON.stringify(res, null, 2));
-          }}
-        >
-          Simulate opt-in player1@example.test
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function Phase2({
-  seasonId,
-  onLog,
-}: {
-  seasonId: string;
-  onLog: (s: string) => void;
-}) {
-  return (
-    <div>
-      <h1>Phase 2 stubs</h1>
-      <div className="card row">
-        <button
-          type="button"
-          className="secondary"
-          disabled={!seasonId}
-          onClick={async () => {
-            const res = await api<unknown>("/api/phase2/booking-proposals", {
-              method: "POST",
-              body: JSON.stringify({
-                seasonId,
-                weekNumber: 1,
-                payload: {
-                  weekNumber: 1,
-                  assignments: [
-                    {
-                      boxNumber: 1,
-                      match: [1, 2],
-                      court: 1,
-                      slotLabel: "Mon4:30",
-                    },
-                  ],
-                },
-              }),
-            });
-            onLog(JSON.stringify(res, null, 2));
-          }}
-        >
-          Create booking proposal (stub)
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          disabled={!seasonId}
-          onClick={async () => {
-            const res = await api<unknown>("/api/phase2/rating-adjustments", {
-              method: "POST",
-              body: JSON.stringify([
-                { playerId: "x", suggestedDelta: 0.05, reason: "final win" },
-              ]),
-            });
-            onLog(JSON.stringify(res, null, 2));
-          }}
-        >
-          Try rating write-back (stub)
-        </button>
-      </div>
     </div>
   );
 }

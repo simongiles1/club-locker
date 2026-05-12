@@ -9,11 +9,11 @@ import {
 import {
   CHAMPIONSHIP_KNOCKOUT_STAGE_ORDER,
   divisionCode,
-  divisionDisplayName,
   entrantsAtBracketRoundStart,
   interpolateEmailTemplate,
   knockoutStageLabel,
   type ChampionshipDivision,
+  type EmailTemplateScope,
 } from "@squash/shared";
 import { api } from "./api.js";
 import { EmailsPage } from "./EmailsPage.js";
@@ -22,6 +22,7 @@ import {
   MemberSearchSelect,
   clubMemberDisplayName as memberDisplayName,
 } from "./MemberSearchSelect.js";
+import { DivisionSearchSelect } from "./DivisionSearchSelect.js";
 import { useToast } from "./toast.js";
 
 type SeasonRoundScheduleRow = {
@@ -155,10 +156,14 @@ async function ensureClubMemberPlayer(m: ClubMember): Promise<PlayerRow> {
 export function ChampionshipsPage({
   seasonId,
   clubYear,
+  championshipYears,
+  onSelectClubYear,
 }: {
   seasonId: string;
   /** Calendar club-booking year for labels (canonical season row still backs APIs). */
   clubYear: number | null;
+  championshipYears: number[];
+  onSelectClubYear: (year: number) => void;
 }) {
   const { show, error } = useToast();
   const [divisions, setDivisions] = useState<ChampionshipDivision[]>([]);
@@ -480,21 +485,6 @@ export function ChampionshipsPage({
   return (
     <div className="championships-page">
       <h1 className="championships-page-title">Club Championships</h1>
-      <p className="champ-help champ-help--page">
-        {pageTab === "emails" ? (
-          <>
-            Draft and test club messages from the shared email outbox; use{" "}
-            <strong>Divisions</strong> or <strong>Round schedule</strong> for bracket
-            setup and due dates.
-          </>
-        ) : (
-          <>
-            Manage draws by division under <strong>Divisions</strong>, or open{" "}
-            <strong>Round schedule</strong> to set playoff round due dates once for the
-            year (shared by every bracket).
-          </>
-        )}
-      </p>
 
       <div className="champ-page-toolbar">
         <div className="champ-page-toolbar-tabs">
@@ -538,54 +528,63 @@ export function ChampionshipsPage({
             </button>
           </div>
         </div>
-        {pageTab === "divisions" ? (
-          <div className="champ-toolbar-actions">
+        <div className="champ-toolbar-actions">
+          <div className="champ-toolbar-fields-row">
             <div className="champ-division-field">
               <label className="champ-division-label">
-                Division{" "}
+                Year{" "}
                 <select
                   className="champ-division-select"
-                  value={selectedCode}
-                  onChange={(e) => setSelectedCode(e.target.value)}
-                  aria-describedby="champ-division-legend"
+                  value={clubYear != null ? String(clubYear) : ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (!raw) return;
+                    const year = Number(raw);
+                    if (!Number.isFinite(year)) return;
+                    onSelectClubYear(year);
+                  }}
                 >
-                  {divisions.map((d) => {
-                    const code = divisionCode(d);
-                    const created = divisionCodesCreatedForSeason.has(code);
-                    return (
-                      <option key={code} value={code}>
-                        {divisionDisplayName(d)}
-                        {created ? " ✓" : ""}
-                      </option>
-                    );
-                  })}
+                  {championshipYears.length === 0 ? (
+                    <option value="">No club-booking years</option>
+                  ) : null}
+                  {clubYear == null && championshipYears.length > 0 ? (
+                    <option value="">— pick year —</option>
+                  ) : null}
+                  {championshipYears.map((y) => (
+                    <option key={y} value={String(y)}>
+                      {y}
+                    </option>
+                  ))}
                 </select>
               </label>
-              <p id="champ-division-legend" className="champ-division-legend">
-                ✓ = a championship exists for this year (division created).
-              </p>
             </div>
-            {!championshipForSelection && selectedDivision ? (
-              <button
-                type="button"
-                className="primary"
-                disabled={busy}
-                onClick={ensureChampionshipExists}
-              >
-                Create division for this year
-              </button>
-            ) : null}
-            {championshipForSelection ? (
-              <span
-                className={`champ-badge champ-badge--${detail?.championship.status ?? championshipForSelection.status}`}
-              >
-                {(
-                  detail?.championship.status ?? championshipForSelection.status
-                ).toUpperCase()}
-              </span>
+            {pageTab === "divisions" ? (
+              <DivisionSearchSelect
+                idPrefix="champ-division-toolbar"
+                label="Division"
+                divisions={divisions}
+                selectedCode={selectedCode}
+                createdCodes={divisionCodesCreatedForSeason}
+                onSelectCode={setSelectedCode}
+                disabled={busy || divisions.length === 0}
+              />
             ) : null}
           </div>
-        ) : null}
+          {pageTab === "divisions" ? (
+            <>
+              {!championshipForSelection && selectedDivision ? (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={ensureChampionshipExists}
+                >
+                  Create division for this year
+                </button>
+              ) : null}
+            </>
+          ) : null}
+        </div>
       </div>
 
       {pageTab === "emails" ? (
@@ -594,7 +593,7 @@ export function ChampionshipsPage({
           role="tabpanel"
           aria-labelledby="tab-emails"
         >
-          <EmailsPage onLog={show} />
+          <EmailsPage onLog={show} templateScope="championships" />
         </div>
       ) : null}
 
@@ -1072,6 +1071,7 @@ type TestEmailFormPreset = {
 type EmailTemplateRow = {
   id: string;
   name: string;
+  scope: EmailTemplateScope;
   subjectTemplate: string;
   bodyTemplate: string;
 };
@@ -1588,7 +1588,9 @@ function TestEmailModal({
 
   useEffect(() => {
     let cancelled = false;
-    api<EmailTemplateRow[]>("/api/email-templates")
+    api<EmailTemplateRow[]>(
+      `/api/email-templates?scope=${encodeURIComponent("championships")}`,
+    )
       .then((rows) => {
         if (!cancelled) setEmailTemplates(rows);
       })

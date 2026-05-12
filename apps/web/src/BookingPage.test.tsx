@@ -8,7 +8,7 @@ describe("BookingPage", () => {
       <BookingPage seasonId="season-1" onLog={() => {}} />,
     );
     expect(html).toContain("First Monday of season");
-    expect(html).toContain("Weeks to book");
+    expect(html).toContain("Refresh preview");
     expect(html).toContain("Run season block (bulk)");
     expect(html).toContain("Court booking: season block");
   });
