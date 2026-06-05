@@ -2,6 +2,7 @@ import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { AppConfig } from "../config.js";
 import { championships, championshipEntries, championshipMatches, emailOutbox, inboundActions, inboundEmails, players } from "../db/schema.js";
+import { mailboxScopeFromAliasTag } from "../emails/mailboxScope.js";
 import type { AiAgent } from "./aiAgent.js";
 import { runWithExecution, type ExecutionTrigger, type StepRuntimeMode } from "./executions.js";
 import { confidenceAllowsAutoApply, shouldAutoSendForCurrentMode } from "./settings.js";
@@ -182,6 +183,7 @@ export async function processInboundEmail(
             bodyText: input.bodyText ?? null,
             bodyHtml: input.bodyHtml ?? null,
             aliasTag,
+            mailboxScope: mailboxScopeFromAliasTag(aliasTag),
             receivedAt: input.receivedAt ?? nowIso,
             processedAt: null,
           })

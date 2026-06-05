@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { StatHoliday } from "@squash/shared";
+import type { StatHoliday, StatHolidayKind } from "@squash/shared";
+import { Pencil, Trash2 } from "lucide-react";
 import { api } from "./api.js";
 import { useToast } from "./toast.js";
 
@@ -7,6 +8,7 @@ type StatutoryHolidayApiRow = {
   id: string;
   name: string;
   date: string;
+  kind: StatHolidayKind;
   hours: {
     open: string | null;
     close: string | null;
@@ -24,6 +26,7 @@ function apiRowToStatHoliday(row: StatutoryHolidayApiRow): StatHoliday {
   return {
     name: row.name,
     date: row.date,
+    kind: row.kind,
     hours: {
       open: row.hours.open,
       close: row.hours.close,
@@ -32,7 +35,11 @@ function apiRowToStatHoliday(row: StatutoryHolidayApiRow): StatHoliday {
   };
 }
 
-export function StatutoryHolidaysPage() {
+function kindLabel(kind: StatHolidayKind): string {
+  return kind === "event" ? "Event" : "Holiday";
+}
+
+export function StatutoryHolidaysPage({ embedded = false }: { embedded?: boolean }) {
   const { show } = useToast();
   const [rows, setRows] = useState<StatutoryHolidayApiRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,13 +52,61 @@ export function StatutoryHolidaysPage() {
   const [newClosed, setNewClosed] = useState(false);
   const [newOpen, setNewOpen] = useState("08:00");
   const [newClose, setNewClose] = useState("18:00");
+  const [newKind, setNewKind] = useState<StatHolidayKind>("holiday");
+  const [closureModalOpen, setClosureModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const resetFormFields = useCallback(() => {
+    setNewName("");
+    setNewDate("");
+    setNewClosed(false);
+    setNewOpen("08:00");
+    setNewClose("18:00");
+    setNewKind("holiday");
+  }, []);
+
+  const closeModal = useCallback(() => {
+    setClosureModalOpen(false);
+    setEditingId(null);
+    resetFormFields();
+  }, [resetFormFields]);
+
+  const openAddModal = useCallback(() => {
+    setEditingId(null);
+    resetFormFields();
+    setClosureModalOpen(true);
+  }, [resetFormFields]);
+
+  const openEditModal = useCallback(
+    (r: StatutoryHolidayApiRow) => {
+      resetFormFields();
+      setEditingId(r.id);
+      setNewName(r.name);
+      setNewDate(r.date);
+      setNewKind(r.kind);
+      setNewClosed(r.hours.closed);
+      setNewOpen(r.hours.open ?? "08:00");
+      setNewClose(r.hours.close ?? "18:00");
+      setClosureModalOpen(true);
+    },
+    [resetFormFields],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const data = await api<StatutoryHolidayApiRow[]>("/api/statutory-holidays");
-      setRows(Array.isArray(data) ? data : []);
+      const data = await api<(Omit<StatutoryHolidayApiRow, "kind"> & { kind?: StatHolidayKind })[]>(
+        "/api/statutory-holidays",
+      );
+      setRows(
+        Array.isArray(data)
+          ? data.map((r) => ({
+              ...r,
+              kind: r.kind === "event" ? "event" : "holiday",
+            }))
+          : [],
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setLoadError(msg);
@@ -80,43 +135,70 @@ export function StatutoryHolidaysPage() {
     [rows, year],
   );
 
-  const addHoliday = useCallback(async () => {
+  const saveClosure = useCallback(async () => {
     const name = newName.trim();
     const date = newDate.trim();
     if (!name || !date) {
       show("Enter a name and date.");
       return;
     }
+    const editId = editingId;
+    const payload = {
+      name,
+      date,
+      closed: newClosed,
+      open: newClosed ? null : newOpen,
+      close: newClosed ? null : newClose,
+      kind: newKind,
+    };
     setSaving(true);
     try {
-      await api("/api/statutory-holidays", {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          date,
-          closed: newClosed,
-          open: newClosed ? null : newOpen,
-          close: newClosed ? null : newClose,
-        }),
-      });
-      setNewName("");
-      setNewDate("");
-      setNewClosed(false);
-      setNewOpen("08:00");
-      setNewClose("18:00");
+      if (editId) {
+        await api(`/api/statutory-holidays/${editId}`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        show("Closure updated.");
+      } else {
+        await api("/api/statutory-holidays", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        show("Closure saved.");
+      }
       await load();
-      show("Holiday added.");
+      closeModal();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       show(msg);
     } finally {
       setSaving(false);
     }
-  }, [newName, newDate, newClosed, newOpen, newClose, load, show]);
+  }, [
+    newName,
+    newDate,
+    newClosed,
+    newOpen,
+    newClose,
+    newKind,
+    editingId,
+    load,
+    show,
+    closeModal,
+  ]);
+
+  useEffect(() => {
+    if (!closureModalOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !saving) closeModal();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [closureModalOpen, saving, closeModal]);
 
   const removeHoliday = useCallback(
     async (id: string, label: string) => {
-      if (!window.confirm(`Remove “${label}” from statutory holidays?`)) return;
+      if (!window.confirm(`Remove “${label}” from closures?`)) return;
       try {
         await api(`/api/statutory-holidays/${id}`, { method: "DELETE" });
         await load();
@@ -129,17 +211,18 @@ export function StatutoryHolidaysPage() {
     [load, show],
   );
 
-  return (
-    <div
-      className="statutory-holidays-page"
-      id="panel-houseleague-statutory"
-      role="tabpanel"
-      aria-labelledby="tab-houseleague-statutory"
-    >
-      <p className="houseleague-lead houseleague-lead--page">
-        Statutory and special closure days drive the court-booking calendar (Monday shifts, early
-        close blocks). Defaults are seeded for several club years; edit the list below anytime.
-      </p>
+  const modalTitle = editingId ? "Edit closure" : "Add closure";
+  const modalTitleId = "statutory-holidays-closure-modal-title";
+
+  const inner = (
+    <>
+      {embedded ? null : (
+        <p className="houseleague-lead houseleague-lead--page">
+          Statutory holidays and club events (parties, tournaments) share this list. Only{" "}
+          <strong>Holiday</strong> rows shift Monday league play when they fall on a Monday;{" "}
+          <strong>Event</strong> rows adjust hours on the calendar only.
+        </p>
+      )}
 
       <div className="card statutory-holidays-toolbar">
         <label>
@@ -164,6 +247,9 @@ export function StatutoryHolidaysPage() {
         >
           Refresh
         </button>
+        <button type="button" className="primary" onClick={openAddModal}>
+          Add closure
+        </button>
       </div>
 
       {loadError ? (
@@ -172,64 +258,109 @@ export function StatutoryHolidaysPage() {
         </div>
       ) : null}
 
-      <div className="card statutory-holidays-add">
-        <h2 className="statutory-holidays-add-title">Add a holiday</h2>
-        <div className="statutory-holidays-add-grid">
-          <label className="statutory-holidays-field">
-            <span>Name</span>
-            <input
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="e.g. Civic Holiday"
-              autoComplete="off"
-            />
-          </label>
-          <label className="statutory-holidays-field">
-            <span>Date</span>
-            <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} />
-          </label>
-          <label className="statutory-holidays-field statutory-holidays-field--check">
-            <input
-              type="checkbox"
-              checked={newClosed}
-              onChange={(e) => setNewClosed(e.target.checked)}
-            />
-            <span>Fully closed</span>
-          </label>
-          {!newClosed ? (
-            <>
-              <label className="statutory-holidays-field">
-                <span>Open</span>
-                <input type="time" value={newOpen} onChange={(e) => setNewOpen(e.target.value)} />
-              </label>
-              <label className="statutory-holidays-field">
-                <span>Close</span>
-                <input type="time" value={newClose} onChange={(e) => setNewClose(e.target.value)} />
-              </label>
-            </>
-          ) : null}
-        </div>
-        <div className="row" style={{ marginTop: "0.75rem" }}>
-          <button
-            type="button"
-            className="primary"
-            disabled={saving}
-            onClick={() => void addHoliday()}
+      {closureModalOpen ? (
+        <div
+          className="booking-single-match-backdrop"
+          role="presentation"
+          onMouseDown={(ev) => {
+            if (ev.target === ev.currentTarget && !saving) closeModal();
+          }}
+        >
+          <div
+            className="booking-single-match-modal statutory-holidays-add-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={modalTitleId}
+            onMouseDown={(ev) => ev.stopPropagation()}
           >
-            {saving ? "Saving…" : "Add holiday"}
-          </button>
+            <h3 id={modalTitleId} style={{ marginTop: 0 }}>
+              {modalTitle}
+            </h3>
+            <div className="statutory-holidays-modal-name-date">
+              <label className="statutory-holidays-field">
+                <span>Name</span>
+                <input
+                  type="text"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder="e.g. Civic Holiday or Holiday party"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="statutory-holidays-field">
+                <span>Date</span>
+                <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} />
+              </label>
+            </div>
+            <div className="statutory-holidays-modal-type-check-row">
+              <label className="statutory-holidays-field statutory-holidays-modal-kind">
+                <span>Type</span>
+                <select
+                  value={newKind}
+                  onChange={(e) => setNewKind(e.target.value as StatHolidayKind)}
+                  aria-label="Closure type"
+                >
+                  <option value="holiday">Holiday</option>
+                  <option value="event">Event</option>
+                </select>
+              </label>
+              <label className="statutory-holidays-field statutory-holidays-field--check statutory-holidays-field--check-modal">
+                <input
+                  type="checkbox"
+                  checked={newClosed}
+                  onChange={(e) => setNewClosed(e.target.checked)}
+                />
+                <span>Fully closed</span>
+              </label>
+            </div>
+            {!newClosed ? (
+              <div className="statutory-holidays-modal-hours-row">
+                <label className="statutory-holidays-field">
+                  <span>Open</span>
+                  <input type="time" value={newOpen} onChange={(e) => setNewOpen(e.target.value)} />
+                </label>
+                <label className="statutory-holidays-field">
+                  <span>Close</span>
+                  <input
+                    type="time"
+                    value={newClose}
+                    onChange={(e) => setNewClose(e.target.value)}
+                  />
+                </label>
+              </div>
+            ) : null}
+            <div className="booking-single-match-actions">
+              <button type="button" className="secondary" disabled={saving} onClick={closeModal}>
+                Cancel
+              </button>
+              <button type="button" className="primary" disabled={saving} onClick={() => void saveClosure()}>
+                {saving ? "Saving…" : editingId ? "Save changes" : "Save closure"}
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <div className="card">
-        <h2 className="statutory-holidays-list-title">
-          {year} holidays
-          {loading ? " (loading…)" : ""}
-        </h2>
+        <div className="statutory-holidays-list-head">
+          <h2 className="statutory-holidays-list-title">
+            {year} closures
+            {loading ? " (loading…)" : ""}
+          </h2>
+          {!loading && filtered.length > 0 ? (
+            <div className="statutory-holidays-row-legend" role="group" aria-label="Row colours">
+              <span className="statutory-holidays-legend-item statutory-holidays-legend-item--holiday">
+                Holiday
+              </span>
+              <span className="statutory-holidays-legend-item statutory-holidays-legend-item--event">
+                Event
+              </span>
+            </div>
+          ) : null}
+        </div>
         {filtered.length === 0 && !loading ? (
           <p className="houseleague-status houseleague-status--muted">
-            No holidays for {year}. Add one above or pick another year.
+            No closures for {year}. Use Add closure or pick another year.
           </p>
         ) : (
           <div className="houseleague-table-wrap">
@@ -238,29 +369,48 @@ export function StatutoryHolidaysPage() {
                 <tr>
                   <th scope="col">Date</th>
                   <th scope="col">Name</th>
+                  <th scope="col" className="statutory-holidays-col-type">
+                    Type
+                  </th>
                   <th scope="col">Hours</th>
-                  <th scope="col" className="statutory-holidays-col-action">
-                    <span className="visually-hidden">Remove</span>
+                  <th scope="col" className="statutory-holidays-col-actions">
+                    <span className="visually-hidden">Actions</span>
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((r) => {
                   const st = apiRowToStatHoliday(r);
+                  const rowKindClass =
+                    r.kind === "event"
+                      ? "statutory-holidays-row--event"
+                      : "statutory-holidays-row--holiday";
                   return (
-                    <tr key={r.id}>
+                    <tr key={r.id} className={rowKindClass}>
                       <td>
                         <time dateTime={r.date}>{r.date}</time>
                       </td>
                       <td>{r.name}</td>
+                      <td className="statutory-holidays-col-type statutory-holidays-type-cell">
+                        {kindLabel(r.kind)}
+                      </td>
                       <td>{formatHoursLabel(st.hours)}</td>
-                      <td>
+                      <td className="statutory-holidays-col-actions">
                         <button
                           type="button"
-                          className="secondary statutory-holidays-remove"
+                          className="statutory-holidays-icon-btn"
+                          aria-label={`Edit ${r.name}`}
+                          onClick={() => openEditModal(r)}
+                        >
+                          <Pencil size={18} strokeWidth={2} aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="statutory-holidays-icon-btn statutory-holidays-icon-btn--danger"
+                          aria-label={`Remove ${r.name}`}
                           onClick={() => void removeHoliday(r.id, r.name)}
                         >
-                          Remove
+                          <Trash2 size={18} strokeWidth={2} aria-hidden />
                         </button>
                       </td>
                     </tr>
@@ -271,6 +421,25 @@ export function StatutoryHolidaysPage() {
           </div>
         )}
       </div>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <div className="statutory-holidays-page statutory-holidays-page--embedded">
+        {inner}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="statutory-holidays-page"
+      id="panel-houseleague-statutory"
+      role="tabpanel"
+      aria-labelledby="tab-houseleague-statutory"
+    >
+      {inner}
     </div>
   );
 }

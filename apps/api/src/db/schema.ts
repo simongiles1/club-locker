@@ -26,6 +26,14 @@ export const seasons = sqliteTable("seasons", {
   status: text("status").notNull().default("registration"),
   /** JSON map of bracket round → YYYY-MM-DD due date for all club championships in this season. */
   championshipRoundDueDatesJson: text("championship_round_due_dates_json"),
+  /** US Squash–shaped roster JSON for seasons in `draft` while the next league event is being provisioned upstream. */
+  draftHouseLeaguePlayersJson: text("draft_house_league_players_json"),
+  /** US Squash box league event id for this booking season (Houseleague UI + integrations). */
+  houseLeagueEventId: integer("house_league_event_id"),
+  /** Editable snapshot of box league roster at season open (US Squash–shaped JSON). */
+  seasonStartRosterJson: text("season_start_roster_json"),
+  /** ISO timestamp when `seasonStartRosterJson` was last saved. */
+  seasonStartRosterSavedAt: text("season_start_roster_saved_at"),
   createdAt: text("created_at")
     .notNull()
     .default(sql`(datetime('now'))`),
@@ -92,6 +100,8 @@ export const emailOutbox = sqliteTable("email_outbox", {
   status: text("status").notNull().default("draft"),
   /** When set with status scheduled, dispatcher sends once this instant is reached. */
   scheduledSendAt: text("scheduled_send_at"),
+  /** Set when row reaches `sent` status (manual send path, scheduler, autosend). */
+  sentAt: text("sent_at"),
   toAddress: text("to_address").notNull(),
   subject: text("subject").notNull(),
   body: text("body").notNull(),
@@ -121,6 +131,8 @@ export const statutoryHolidays = sqliteTable(
     openTime: text("open_time"),
     closeTime: text("close_time"),
     closed: integer("closed").notNull().default(0),
+    /** `"holiday"` | `"event"` — events affect hours display but not Monday league shifts. */
+    closureKind: text("closure_kind").notNull().default("holiday"),
     createdAt: text("created_at")
       .notNull()
       .default(sql`(datetime('now'))`),
@@ -139,6 +151,8 @@ export const inboundEmails = sqliteTable("inbound_emails", {
   bodyText: text("body_text"),
   bodyHtml: text("body_html"),
   aliasTag: text("alias_tag"),
+  /** Routed from Gmail +tag (`house_league` vs `championships`). */
+  mailboxScope: text("mailbox_scope"),
   receivedAt: text("received_at").notNull(),
   processedAt: text("processed_at"),
   errorMessage: text("error_message"),
@@ -311,6 +325,33 @@ export const houseLeagueMatchReminderSends = sqliteTable(
   }),
 );
 
+/** One row per successful weekly box email (dedupe per season/week/box). */
+export const houseLeagueWeeklyBoxSends = sqliteTable(
+  "house_league_weekly_box_sends",
+  {
+    id: text("id").primaryKey(),
+    seasonId: text("season_id")
+      .notNull()
+      .references(() => seasons.id, { onDelete: "cascade" }),
+    weekNumber: integer("week_number").notNull(),
+    boxNumber: integer("box_number").notNull(),
+    /** 0 = per-box email; 1–2 = per-matchup slot for that week. */
+    matchIndex: integer("match_index").notNull().default(0),
+    outboxId: text("outbox_id").references(() => emailOutbox.id, {
+      onDelete: "set null",
+    }),
+    sentAt: text("sent_at").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    seasonWeekBoxMatchUidx: uniqueIndex(
+      "hl_weekly_box_send_season_week_box_match_uidx",
+    ).on(t.seasonId, t.weekNumber, t.boxNumber, t.matchIndex),
+  }),
+);
+
 /** Pre-season recurring clinic block for the full season (Mon + Tue series, both courts each). */
 export const seasonBookingHolds = sqliteTable("season_booking_holds", {
   id: text("id").primaryKey(),
@@ -326,6 +367,13 @@ export const seasonBookingHolds = sqliteTable("season_booking_holds", {
   tuesdayReservationIdsJson: text("tuesday_reservation_ids_json").notNull(),
   /** Week numbers (1-based) already converted to match reservations */
   convertedWeeksJson: text("converted_weeks_json").notNull().default("[]"),
+  /**
+   * JSON string[] of `${week}|${date}|${begin}-${end}` slots shown as converted (purple)
+   * on the calendar without Club Locker calls, when the week is still bulk-held (green).
+   */
+  locallyConvertedSlotsJson: text("locally_converted_slots_json")
+    .notNull()
+    .default("[]"),
   rawBulkResponseJson: text("raw_bulk_response_json"),
   createdAt: text("created_at")
     .notNull()
@@ -493,6 +541,18 @@ export const executionSteps = sqliteTable("execution_steps", {
   errorMessage: text("error_message"),
   durationMs: integer("duration_ms"),
   langfuseTraceId: text("langfuse_trace_id"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});
+
+/** Inline images referenced from house league box EML templates. */
+export const boxEmlTemplateAssets = sqliteTable("box_eml_template_assets", {
+  id: text("id").primaryKey(),
+  mimeType: text("mime_type").notNull(),
+  dataBase64: text("data_base64").notNull(),
+  width: integer("width"),
+  height: integer("height"),
   createdAt: text("created_at")
     .notNull()
     .default(sql`(datetime('now'))`),

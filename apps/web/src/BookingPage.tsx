@@ -1,6 +1,12 @@
 import {
   bulkHoldSlotsForWeekday,
+  formatCompactMatchPair,
   getWeekMatchups,
+  parseReservationSlotWindow,
+  livePlayerAtScheduleSeat,
+  OPEN_BOX_SEAT_LABEL,
+  rosterImpactCalendarChipKey,
+  scheduleMatchPairNeedsCourtBooking,
   seasonWeekPlayDatesWithRegistry,
   statHolidayForDateInRegistry,
   statutoryHolidaysForYear,
@@ -19,6 +25,25 @@ import { api } from "./api.js";
 import { leagueSchedule } from "./Schedule.js";
 import type { ClubMember } from "./MembersPage.js";
 import { MemberSearchSelect } from "./MemberSearchSelect.js";
+import type {
+  CourtImpactRow,
+  RosterImpactPayload,
+} from "./RosterImpactReview.js";
+
+function humanBookingPaceDelayMs(): number {
+  return 5000 + Math.random() * 2000;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type RosterImpactCalendarHighlight = {
+  chipKeys: Set<string>;
+  stadiumChipKeys: Set<string>;
+  centerChipKeys: Set<string>;
+  afterLabelByChipCourt: Map<string, string>;
+};
 
 type BulkSlotBookingRef = {
   date: string;
@@ -83,7 +108,17 @@ type SeasonHoldListRow = {
   seasonWeeks: number;
   status: string;
   convertedWeeksJson: string;
+  locallyConvertedSlotsJson?: string;
 };
+
+function localBookingSlotKey(
+  week: number,
+  date: string,
+  begin: string,
+  end: string,
+): string {
+  return `${week}|${date}|${begin}-${end}`;
+}
 
 type CancellableCalendarRow = {
   rowId: string;
@@ -124,6 +159,17 @@ type ConvertResult = {
     deleted: { id: string; status: number; ok: boolean }[];
     created: { key: string; status: number; ok: boolean }[];
     holdId: string;
+  };
+};
+
+type RebookPlayDayResult = {
+  runId: string;
+  status: string;
+  message: string;
+  summary: {
+    playDay: "mon" | "tue";
+    playDate: string;
+    created: { key: string; status: number; ok: boolean }[];
   };
 };
 
@@ -584,16 +630,95 @@ function twoPlayerVsChip(players: string[]): string | null {
   return `${shortPlayerMatchupLabel(a)} v  ${shortPlayerMatchupLabel(b)}`;
 }
 
+type BoxLeaguePlayerForMatchups = {
+  id: number;
+  level: number;
+  playerCurrentRank: number;
+  firstName: string;
+  lastName: string;
+};
+
+function isVacantCourtChipLabel(label: string | undefined): boolean {
+  if (!label) return true;
+  const t = label.trim();
+  return t === "—" || t === OPEN_BOX_SEAT_LABEL;
+}
+
+function formatSeatMatchupAsNamesFromRoster(
+  pair: [number, number],
+  boxLevel: number,
+  roster: readonly BoxLeaguePlayerForMatchups[],
+  seasonStartPlayers?: readonly BoxLeaguePlayerForMatchups[],
+): string {
+  const groundTruth =
+    seasonStartPlayers && seasonStartPlayers.length > 0
+      ? seasonStartPlayers
+      : undefined;
+  if (
+    groundTruth &&
+    roster.length > 0 &&
+    !scheduleMatchPairNeedsCourtBooking(boxLevel, pair, roster, groundTruth)
+  ) {
+    return OPEN_BOX_SEAT_LABEL;
+  }
+  const p1 = livePlayerAtScheduleSeat(boxLevel, pair[0], roster, groundTruth);
+  const p2 = livePlayerAtScheduleSeat(boxLevel, pair[1], roster, groundTruth);
+  if (!p1 || !p2) return formatCompactMatchPair(pair);
+  const n1 = `${p1.firstName.trim()} ${p1.lastName.trim()}`.trim();
+  const n2 = `${p2.firstName.trim()} ${p2.lastName.trim()}`.trim();
+  return `${shortPlayerMatchupLabel(n1)} v  ${shortPlayerMatchupLabel(n2)}`;
+}
+
+function matchupLabelsForBoxLevel(
+  scheduleRowIndex: number,
+  boxLevel: number,
+  showPlayerNames: boolean,
+  players: readonly BoxLeaguePlayerForMatchups[] | undefined,
+  seasonStartPlayers?: readonly BoxLeaguePlayerForMatchups[],
+): { c1: string; c2: string } | null {
+  const row = leagueSchedule[scheduleRowIndex];
+  if (!row) return null;
+  if (row.isPlayoffs) {
+    const parts = row.matches.split(",").map((p) => p.trim()).filter(Boolean);
+    return {
+      c1: parts[0] ?? "—",
+      c2: parts[1] ?? "—",
+    };
+  }
+  const w = getWeekMatchups(scheduleRowIndex + 1);
+  if (showPlayerNames && players?.length) {
+    return {
+      c1: formatSeatMatchupAsNamesFromRoster(
+        w.matches[0],
+        boxLevel,
+        players,
+        seasonStartPlayers,
+      ),
+      c2: formatSeatMatchupAsNamesFromRoster(
+        w.matches[1],
+        boxLevel,
+        players,
+        seasonStartPlayers,
+      ),
+    };
+  }
+  return {
+    c1: formatCompactMatchPair(w.matches[0]),
+    c2: formatCompactMatchPair(w.matches[1]),
+  };
+}
+
 function bookingMemberPickLabel(m: ClubMember): string {
   const n = `${m.firstName ?? ""} ${m.lastName ?? ""}`.trim();
   return n || (m.userName?.trim() ?? "") || `Member ${m.ssmId}`;
 }
 
 /** Key: `${isoDate}|${HH:MM-HH:MM}` → Stadium / Center labels from week preview. */
-function buildSlotPlayerLabelsFromPreview(preview: PreviewResult): Map<
-  string,
-  { stadium: string; center: string }
-> {
+function buildSlotPlayerLabelsFromPreview(
+  preview: PreviewResult,
+  court1Id?: number,
+  court2Id?: number,
+): Map<string, { stadium: string; center: string }> {
   const out = new Map<string, { stadium: string; center: string }>();
   if (!("items" in preview)) return out;
   const byKey = new Map<string, Map<string, string>>();
@@ -609,12 +734,22 @@ function buildSlotPlayerLabelsFromPreview(preview: PreviewResult): Map<
     byCourt.set(item.courtId, label);
   }
   for (const [slotKey, byCourt] of byKey) {
-    const ids = [...byCourt.keys()].sort(
-      (a, b) => Number(a) - Number(b) || a.localeCompare(b),
-    );
-    if (ids.length === 0) continue;
-    const stadium = byCourt.get(ids[0]!) ?? "—";
-    const center = byCourt.get(ids[1] ?? "") ?? (ids.length > 1 ? "—" : stadium);
+    let stadium = "—";
+    let center = "—";
+    if (court1Id != null || court2Id != null) {
+      if (court1Id != null) {
+        stadium = byCourt.get(String(court1Id)) ?? "—";
+      }
+      if (court2Id != null) {
+        center = byCourt.get(String(court2Id)) ?? "—";
+      }
+    } else {
+      const ids = [...byCourt.keys()].sort(
+        (a, b) => Number(a) - Number(b) || a.localeCompare(b),
+      );
+      if (ids.length > 0) stadium = byCourt.get(ids[0]!) ?? "—";
+      if (ids.length > 1) center = byCourt.get(ids[1]!) ?? "—";
+    }
     out.set(slotKey, { stadium, center });
   }
   return out;
@@ -626,10 +761,15 @@ function SeasonBlockWeekCalendar({
   onWeekIndexChange,
   booked,
   bulkWeekConvertedToMatches,
+  locallyConvertedSlotKeys,
   slotPlayerLabels,
+  showMatchupPlayerNames = false,
+  boxLeaguePlayers,
+  seasonStartPlayers,
   onBulkSlotContextMenu,
   onReservedSlotContextMenu,
   statHolidayRegistry,
+  rosterImpactHighlight,
 }: {
   preview: SeasonBulkPreviewResponse;
   weekIndex: number;
@@ -638,8 +778,15 @@ function SeasonBlockWeekCalendar({
   booked: boolean;
   /** True when this play week’s bulk block was already converted to individual match bookings. */
   bulkWeekConvertedToMatches: boolean;
+  /** Per-slot purple display (local only) while the week is still bulk-held. */
+  locallyConvertedSlotKeys?: ReadonlySet<string>;
   /** Optional: player-name matchup lines per date+slot (from week plan preview). */
   slotPlayerLabels?: Map<string, { stadium: string; center: string }>;
+  /** When true, show roster names on matchup chips (relative rank within each box). */
+  showMatchupPlayerNames?: boolean;
+  boxLeaguePlayers?: readonly BoxLeaguePlayerForMatchups[];
+  /** Season-start ground truth for schedule seat → player (when saved). */
+  seasonStartPlayers?: readonly BoxLeaguePlayerForMatchups[];
   /** Right-click: empty column area (any day) or blue preview bulk blocks. */
   onBulkSlotContextMenu?: (e: ReactMouseEvent, slot: BulkSlotBookingRef) => void;
   /** Right-click: green bulk hold blocks or violet converted match blocks. */
@@ -650,6 +797,8 @@ function SeasonBlockWeekCalendar({
   ) => void;
   /** Dates and hours from /api/statutory-holidays (or fallback template). */
   statHolidayRegistry: readonly StatHoliday[];
+  /** Mismatched managed match bookings for the visible converted week (boxes 1–16). */
+  rosterImpactHighlight?: RosterImpactCalendarHighlight;
 }) {
   const monSlots = useMemo(() => bulkHoldSlotsForWeekday("mon"), []);
   const tueSlots = useMemo(() => bulkHoldSlotsForWeekday("tue"), []);
@@ -768,8 +917,8 @@ function SeasonBlockWeekCalendar({
     }
     const w = getWeekMatchups(scheduleRowIndex + 1);
     return {
-      c1: `${w.matches[0][0]}v${w.matches[0][1]}`,
-      c2: `${w.matches[1][0]}v${w.matches[1][1]}`,
+      c1: formatCompactMatchPair(w.matches[0]),
+      c2: formatCompactMatchPair(w.matches[1]),
     };
   }, [scheduleRowIndex]);
 
@@ -841,10 +990,17 @@ function SeasonBlockWeekCalendar({
             </li>
             <li>
               <span
+                className="season-bulk-legend-swatch season-bulk-legend-swatch--roster-stale"
+                aria-hidden
+              />
+              <span>Roster changed — update booking</span>
+            </li>
+            <li>
+              <span
                 className="season-bulk-legend-swatch season-bulk-legend-swatch--holiday"
                 aria-hidden
               />
-              <span>Statutory holiday / closed</span>
+              <span>Holiday, event, or closed day</span>
             </li>
             <li>
               <span
@@ -1048,35 +1204,113 @@ function SeasonBlockWeekCalendar({
                             20,
                           );
                           const slotLookupKey = `${iso}|${s.begin}-${s.end}`;
-                          const namedCourts = slotPlayerLabels?.get(slotLookupKey);
-                          const stadiumMu = namedCourts?.stadium ?? weekCourtMatchups?.c1;
-                          const centerMu = namedCourts?.center ?? weekCourtMatchups?.c2;
+                          const previewLabels = showMatchupPlayerNames
+                            ? slotPlayerLabels?.get(slotLookupKey)
+                            : undefined;
+                          const boxMatchups =
+                            box != null
+                              ? matchupLabelsForBoxLevel(
+                                  scheduleRowIndex,
+                                  box,
+                                  showMatchupPlayerNames,
+                                  boxLeaguePlayers,
+                                  seasonStartPlayers,
+                                )
+                              : null;
+                          const stadiumMu =
+                            previewLabels?.stadium ??
+                            boxMatchups?.c1 ??
+                            weekCourtMatchups?.c1;
+                          const centerMu =
+                            previewLabels?.center ??
+                            boxMatchups?.c2 ??
+                            weekCourtMatchups?.c2;
                           const titleBits = [
                             `${s.begin}–${s.end}`,
                             box != null ? `box ${box}` : null,
-                            stadiumMu && centerMu
-                              ? `Stadium: ${stadiumMu} · Center: ${centerMu}`
+                            !isVacantCourtChipLabel(stadiumMu) ||
+                            !isVacantCourtChipLabel(centerMu)
+                              ? [
+                                  !isVacantCourtChipLabel(stadiumMu)
+                                    ? `Stadium: ${stadiumMu}`
+                                    : null,
+                                  !isVacantCourtChipLabel(centerMu)
+                                    ? `Center: ${centerMu}`
+                                    : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")
                               : null,
                           ].filter(Boolean);
-                          const weekConvertedToMatches = bulkWeekConvertedToMatches;
+                          const slotLocalKey = localBookingSlotKey(
+                            weekIndex + 1,
+                            iso,
+                            s.begin,
+                            s.end,
+                          );
+                          const slotShowAsConverted =
+                            bulkWeekConvertedToMatches ||
+                            (locallyConvertedSlotKeys?.has(slotLocalKey) ?? false);
                           const weekBulkBlockHeld =
-                            bulkHoldShowsBooked && !bulkWeekConvertedToMatches;
+                            bulkHoldShowsBooked && !slotShowAsConverted;
+                          const chipKey =
+                            box != null && bulkWeekConvertedToMatches
+                              ? rosterImpactCalendarChipKey(
+                                  weekIndex + 1,
+                                  iso,
+                                  s.begin,
+                                  s.end,
+                                  box,
+                                )
+                              : null;
+                          const chipNeedsRosterUpdate =
+                            chipKey != null &&
+                            rosterImpactHighlight?.chipKeys.has(chipKey);
+                          const stadiumNeedsUpdate =
+                            chipKey != null &&
+                            rosterImpactHighlight?.stadiumChipKeys.has(chipKey);
+                          const centerNeedsUpdate =
+                            chipKey != null &&
+                            rosterImpactHighlight?.centerChipKeys.has(chipKey);
+                          const stadiumAfter =
+                            chipKey != null
+                              ? rosterImpactHighlight?.afterLabelByChipCourt.get(
+                                  `${chipKey}|stadium`,
+                                )
+                              : undefined;
+                          const centerAfter =
+                            chipKey != null
+                              ? rosterImpactHighlight?.afterLabelByChipCourt.get(
+                                  `${chipKey}|center`,
+                                )
+                              : undefined;
+                          const rosterTitleBits = [
+                            ...titleBits,
+                            chipNeedsRosterUpdate
+                              ? `Update booking: Stadium → ${stadiumAfter ?? "—"}; Center → ${centerAfter ?? "—"}`
+                              : null,
+                          ].filter(Boolean);
                           return (
                             <div
                               key={`${iso}-${s.slotLabel}`}
-                              className={
-                                weekConvertedToMatches
+                              className={[
+                                slotShowAsConverted
                                   ? "gcal-event gcal-event--bulk gcal-event--match-booked"
                                   : weekBulkBlockHeld
                                     ? "gcal-event gcal-event--bulk gcal-event--booked"
                                     : onBulkSlotContextMenu
                                       ? "gcal-event gcal-event--bulk gcal-event--slot-book"
-                                      : "gcal-event gcal-event--bulk"
-                              }
+                                      : "gcal-event gcal-event--bulk",
+                                chipNeedsRosterUpdate
+                                  ? "gcal-event--roster-needs-update"
+                                  : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
                               style={{ top, height: h }}
-                              title={titleBits.join(" · ")}
+                              title={rosterTitleBits.join(" · ")}
                               onContextMenu={
-                                weekConvertedToMatches
+                                slotShowAsConverted
                                   ? onReservedSlotContextMenu
                                     ? (e) => {
                                         e.preventDefault();
@@ -1122,22 +1356,57 @@ function SeasonBlockWeekCalendar({
                                   </span>
                                 ) : null}
                               </div>
-                              {stadiumMu && centerMu ? (
+                              {!isVacantCourtChipLabel(stadiumMu) ||
+                              !isVacantCourtChipLabel(centerMu) ? (
                                 <div
                                   className="gcal-event-courts"
                                   aria-label="This week: Stadium and Center matchups"
                                 >
-                                  <div className="gcal-event-court">
+                                  <div
+                                    className={[
+                                      "gcal-event-court",
+                                      isVacantCourtChipLabel(stadiumMu)
+                                        ? "gcal-event-court--vacant"
+                                        : "",
+                                      stadiumNeedsUpdate
+                                        ? "gcal-event-court--roster-needs-update"
+                                        : "",
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" ")}
+                                  >
                                     <span className="gcal-event-court-hd">Stadium</span>
                                     <span className="gcal-event-court-mu">
-                                      {stadiumMu}
+                                      {stadiumMu ?? "—"}
                                     </span>
+                                    {stadiumNeedsUpdate && stadiumAfter ? (
+                                      <span className="gcal-event-court-after">
+                                        → {stadiumAfter}
+                                      </span>
+                                    ) : null}
                                   </div>
-                                  <div className="gcal-event-court">
+                                  <div
+                                    className={[
+                                      "gcal-event-court",
+                                      isVacantCourtChipLabel(centerMu)
+                                        ? "gcal-event-court--vacant"
+                                        : "",
+                                      centerNeedsUpdate
+                                        ? "gcal-event-court--roster-needs-update"
+                                        : "",
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" ")}
+                                  >
                                     <span className="gcal-event-court-hd">Center</span>
                                     <span className="gcal-event-court-mu">
-                                      {centerMu}
+                                      {centerMu ?? "—"}
                                     </span>
+                                    {centerNeedsUpdate && centerAfter ? (
+                                      <span className="gcal-event-court-after">
+                                        → {centerAfter}
+                                      </span>
+                                    ) : null}
                                   </div>
                                 </div>
                               ) : null}
@@ -1192,13 +1461,20 @@ function SeasonBlockWeekCalendar({
 export function BookingPage({
   seasonId,
   seasonStartMondayISO = "",
+  boxLeaguePlayers,
   onLog,
 }: {
   seasonId: string;
   /** First Monday for the selected DB season (from calendar_segment + club_year). */
   seasonStartMondayISO?: string;
+  /** Roster from the linked box league (Boxes tab / players endpoint). */
+  boxLeaguePlayers?: readonly BoxLeaguePlayerForMatchups[];
   onLog: (s: string) => void;
 }) {
+  const [showMatchupPlayerNames, setShowMatchupPlayerNames] = useState(false);
+  const [seasonStartPlayers, setSeasonStartPlayers] = useState<
+    BoxLeaguePlayerForMatchups[]
+  >([]);
   const [startMondayForSeason, setStartMondayForSeason] = useState("");
   const [weeksToBook, setWeeksToBook] = useState<number>(8);
   const [seasonBulkRunModalOpen, setSeasonBulkRunModalOpen] = useState(false);
@@ -1209,6 +1485,7 @@ export function BookingPage({
     seasonWeeks: number;
     status: string;
     convertedWeeks: number[];
+    locallyConvertedSlotKeys: Set<string>;
   } | null>(null);
   const hasActiveSeasonHoldForConvert =
     activeSeasonHold?.status === "active" && Boolean(activeSeasonHold.id);
@@ -1237,6 +1514,18 @@ export function BookingPage({
   const [apiHolidayRegistry, setApiHolidayRegistry] = useState<
     StatHoliday[] | undefined
   >(undefined);
+  const [rosterImpact, setRosterImpact] = useState<RosterImpactPayload | null>(
+    null,
+  );
+  const [rosterImpactLoading, setRosterImpactLoading] = useState(false);
+  const [rosterImpactApplyModalOpen, setRosterImpactApplyModalOpen] =
+    useState(false);
+  const [rosterImpactApplyBusy, setRosterImpactApplyBusy] = useState(false);
+  const [rosterImpactApplyProgress, setRosterImpactApplyProgress] = useState<{
+    current: number;
+    total: number;
+    label: string;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1246,6 +1535,7 @@ export function BookingPage({
           id: string;
           name: string;
           date: string;
+          kind?: "holiday" | "event";
           hours: {
             open: string | null;
             close: string | null;
@@ -1258,6 +1548,7 @@ export function BookingPage({
           rows.map((r) => ({
             name: r.name,
             date: r.date,
+            kind: r.kind === "event" ? "event" : "holiday",
             hours: {
               open: r.hours.open,
               close: r.hours.close,
@@ -1291,6 +1582,107 @@ export function BookingPage({
     activeSeasonHold?.convertedWeeks?.includes(calendarWeekNumber),
   );
 
+  const convertedWeeksKey = activeSeasonHold?.convertedWeeks?.join(",") ?? "";
+  const locallyConvertedSlotsKey = [
+    ...Array.from(activeSeasonHold?.locallyConvertedSlotKeys ?? []).sort(),
+  ].join("|");
+
+  const refreshRosterImpact = useCallback(async () => {
+    if (!seasonId || !activeSeasonHold?.convertedWeeks?.length) {
+      setRosterImpact(null);
+      return;
+    }
+    setRosterImpactLoading(true);
+    try {
+      const payload = await api<RosterImpactPayload>(
+        `/api/seasons/${seasonId}/house-league/roster-impact?weekFilter=current_and_future`,
+      );
+      setRosterImpact(payload);
+    } catch (err) {
+      console.error(err);
+      setRosterImpact(null);
+    } finally {
+      setRosterImpactLoading(false);
+    }
+  }, [seasonId, convertedWeeksKey, locallyConvertedSlotsKey]);
+
+  useEffect(() => {
+    refreshRosterImpact().catch(() => {});
+  }, [refreshRosterImpact, boxLeaguePlayers]);
+
+  const courtSlotsToApply = useMemo((): CourtImpactRow[] => {
+    const rows =
+      rosterImpact?.courtRows.filter((r) => r.status !== "ok" && r.managed) ??
+      [];
+    return [...rows].sort((a, b) => {
+      if (a.weekNumber !== b.weekNumber) return a.weekNumber - b.weekNumber;
+      if (a.playDate !== b.playDate) return a.playDate.localeCompare(b.playDate);
+      if (a.slot !== b.slot) return a.slot.localeCompare(b.slot);
+      return a.courtId - b.courtId;
+    });
+  }, [rosterImpact]);
+
+  const rosterImpactHighlight = useMemo((): RosterImpactCalendarHighlight | undefined => {
+    if (!rosterImpact || !bulkWeekConvertedToMatches) return undefined;
+    const chipKeys = new Set<string>();
+    const stadiumChipKeys = new Set<string>();
+    const centerChipKeys = new Set<string>();
+    const afterLabelByChipCourt = new Map<string, string>();
+    const court1 = rosterImpact.court1Id;
+    const court2 = rosterImpact.court2Id;
+
+    for (const row of rosterImpact.courtRows) {
+      if (row.status === "ok" || row.weekNumber !== calendarWeekNumber) continue;
+      const win = parseReservationSlotWindow(row.slot);
+      if (!win) continue;
+      const chipKey = rosterImpactCalendarChipKey(
+        row.weekNumber,
+        row.playDate,
+        win.begin,
+        win.end,
+        row.boxNumber,
+      );
+      chipKeys.add(chipKey);
+      const courtSide =
+        row.courtId === court1
+          ? "stadium"
+          : row.courtId === court2
+            ? "center"
+            : null;
+      if (courtSide === "stadium") stadiumChipKeys.add(chipKey);
+      else if (courtSide === "center") centerChipKeys.add(chipKey);
+      if (courtSide) {
+        if (row.after) {
+          afterLabelByChipCourt.set(
+            `${chipKey}|${courtSide}`,
+            `${row.after.playerNames[0]} vs ${row.after.playerNames[1]}`,
+          );
+        } else if (row.status === "extra_booking") {
+          afterLabelByChipCourt.set(`${chipKey}|${courtSide}`, "Cancel booking");
+        }
+      }
+    }
+
+    if (chipKeys.size === 0) return undefined;
+    return {
+      chipKeys,
+      stadiumChipKeys,
+      centerChipKeys,
+      afterLabelByChipCourt,
+    };
+  }, [rosterImpact, bulkWeekConvertedToMatches, calendarWeekNumber]);
+
+  const visibleWeekCourtSlotsNeedingUpdate = useMemo(
+    () =>
+      rosterImpact?.courtRows.filter(
+        (r) =>
+          r.status !== "ok" &&
+          r.managed &&
+          r.weekNumber === calendarWeekNumber,
+      ).length ?? 0,
+    [rosterImpact, calendarWeekNumber],
+  );
+
   /** Weeks still covered by an active bulk hold (not converted) cannot be unchecked in a new run. */
   const minBulkRunDraftWeeks = useMemo(() => {
     if (!activeSeasonHold || activeSeasonHold.status !== "active") return 0;
@@ -1315,11 +1707,20 @@ export function BookingPage({
     [activeSeasonHold],
   );
 
+  const visibleWeekCanConvert = Boolean(
+    hasActiveSeasonHoldForConvert &&
+      activeSeasonHold &&
+      calendarWeekNumber <= activeSeasonHold.seasonWeeks &&
+      isBulkWeekStillHeld(calendarWeekNumber),
+  );
+
   const [viewedWeekPreview, setViewedWeekPreview] = useState<PreviewResult | null>(
     null,
   );
   const [viewedWeekPreviewLoading, setViewedWeekPreviewLoading] = useState(false);
   const [convertWeekLoading, setConvertWeekLoading] = useState(false);
+  const [stadiumIdMapTestLoading, setStadiumIdMapTestLoading] = useState(false);
+  const [bookSlotBothCourtsLoading, setBookSlotBothCourtsLoading] = useState(false);
   const [convertFeedback, setConvertFeedback] = useState<{
     kind: "ok" | "error";
     message: string;
@@ -1487,8 +1888,12 @@ export function BookingPage({
 
   const slotPlayerLabelsForCalendar = useMemo(() => {
     if (!viewedWeekPreview || !("items" in viewedWeekPreview)) return undefined;
-    return buildSlotPlayerLabelsFromPreview(viewedWeekPreview);
-  }, [viewedWeekPreview]);
+    return buildSlotPlayerLabelsFromPreview(
+      viewedWeekPreview,
+      rosterImpact?.court1Id,
+      rosterImpact?.court2Id,
+    );
+  }, [viewedWeekPreview, rosterImpact?.court1Id, rosterImpact?.court2Id]);
 
   const seasonBulkIssueLines = useMemo(
     () =>
@@ -1501,6 +1906,51 @@ export function BookingPage({
   useEffect(() => {
     if (seasonStartMondayISO) setStartMondayForSeason(seasonStartMondayISO);
   }, [seasonId, seasonStartMondayISO]);
+
+  useEffect(() => {
+    if (!seasonId) {
+      setSeasonStartPlayers([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await api<{ players: unknown[] }>(
+          `/api/seasons/${seasonId}/season-start-roster`,
+        );
+        if (cancelled) return;
+        const parsed: BoxLeaguePlayerForMatchups[] = [];
+        for (const raw of res.players ?? []) {
+          if (!raw || typeof raw !== "object") continue;
+          const r = raw as Record<string, unknown>;
+          const id = Number(r.id);
+          const level = Number(r.level);
+          const playerCurrentRank = Number(r.playerCurrentRank);
+          if (
+            !Number.isFinite(id) ||
+            id <= 0 ||
+            !Number.isFinite(level) ||
+            !Number.isFinite(playerCurrentRank)
+          ) {
+            continue;
+          }
+          parsed.push({
+            id,
+            level,
+            playerCurrentRank,
+            firstName: typeof r.firstName === "string" ? r.firstName : "",
+            lastName: typeof r.lastName === "string" ? r.lastName : "",
+          });
+        }
+        setSeasonStartPlayers(parsed);
+      } catch {
+        if (!cancelled) setSeasonStartPlayers([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [seasonId]);
 
   /** Load week plan preview for the calendar week so chips can show player names. */
   useEffect(() => {
@@ -1542,7 +1992,13 @@ export function BookingPage({
     return () => {
       cancelled = true;
     };
-  }, [seasonId, startMondayForSeason, seasonCalendarWeekIndex, holidayRegistry]);
+  }, [
+    seasonId,
+    startMondayForSeason,
+    seasonCalendarWeekIndex,
+    holidayRegistry,
+    seasonStartPlayers.length,
+  ]);
 
   const refreshLocalSeasonHolds = useCallback(async () => {
     if (!seasonId || !startMondayForSeason) {
@@ -1573,6 +2029,20 @@ export function BookingPage({
                   return [];
                 }
               })(),
+              locallyConvertedSlotKeys: (() => {
+                try {
+                  const raw = JSON.parse(
+                    match.locallyConvertedSlotsJson ?? "[]",
+                  ) as unknown;
+                  return new Set(
+                    Array.isArray(raw)
+                      ? raw.filter((k): k is string => typeof k === "string")
+                      : [],
+                  );
+                } catch {
+                  return new Set<string>();
+                }
+              })(),
             }
           : null,
       );
@@ -1580,6 +2050,176 @@ export function BookingPage({
       console.error(err);
     }
   }, [seasonId, startMondayForSeason]);
+
+  const markSlotDisplayLocal = useCallback(
+    async (
+      slot: BulkSlotBookingRef,
+      display: "bulk_held" | "converted",
+    ) => {
+      if (!seasonId || !startMondayForSeason) {
+        window.alert("Set a season and start Monday first.");
+        return;
+      }
+      const label =
+        display === "converted"
+          ? "converted (purple)"
+          : "bulk-held (green)";
+      if (
+        !window.confirm(
+          `Mark ${formatISODateLongEn(slot.date)} ${slot.begin}–${slot.end} as ${label} in this app only?\n\nClub Locker will not be changed.`,
+        )
+      ) {
+        return;
+      }
+      try {
+        const res = await api<
+          { ok: true; message: string } | { ok: false; error: string }
+        >(`/api/seasons/${seasonId}/booking/mark-slot-local`, {
+          method: "POST",
+          body: JSON.stringify({
+            startMondayDate: startMondayForSeason,
+            week: calendarWeekNumber,
+            date: slot.date,
+            begin: slot.begin,
+            end: slot.end,
+            display,
+          }),
+        });
+        if (!res.ok) {
+          window.alert(res.error);
+          onLog(res.error);
+          return;
+        }
+        onLog(res.message);
+        await refreshLocalSeasonHolds();
+        setSeasonBulkFeedback({ kind: "ok", message: res.message });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        onLog(msg);
+        window.alert(msg);
+      }
+    },
+    [
+      seasonId,
+      startMondayForSeason,
+      calendarWeekNumber,
+      onLog,
+      refreshLocalSeasonHolds,
+    ],
+  );
+
+  const markVisibleWeekDisplayLocal = useCallback(
+    async (display: "bulk_held" | "converted") => {
+      if (!seasonId || !startMondayForSeason) {
+        window.alert("Set a season and start Monday first.");
+        return;
+      }
+      const label =
+        display === "bulk_held"
+          ? "bulk-held (green)"
+          : "converted to individual matches (purple)";
+      if (
+        !window.confirm(
+          `Mark season week ${calendarWeekNumber} as ${label} in this app only?\n\nClub Locker will not be changed.`,
+        )
+      ) {
+        return;
+      }
+      try {
+        const res = await api<
+          { ok: true; message: string } | { ok: false; error: string }
+        >(`/api/seasons/${seasonId}/booking/mark-week-local`, {
+          method: "POST",
+          body: JSON.stringify({
+            startMondayDate: startMondayForSeason,
+            week: calendarWeekNumber,
+            display,
+          }),
+        });
+        if (!res.ok) {
+          window.alert(res.error);
+          onLog(res.error);
+          return;
+        }
+        onLog(res.message);
+        await refreshLocalSeasonHolds();
+        setSeasonBulkFeedback({ kind: "ok", message: res.message });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        onLog(msg);
+        window.alert(msg);
+      }
+    },
+    [
+      seasonId,
+      startMondayForSeason,
+      calendarWeekNumber,
+      onLog,
+      refreshLocalSeasonHolds,
+    ],
+  );
+
+  const applyAllRosterCourtUpdates = useCallback(async () => {
+    if (courtSlotsToApply.length === 0) return;
+    setRosterImpactApplyBusy(true);
+    setRosterImpactApplyProgress({
+      current: 0,
+      total: courtSlotsToApply.length,
+      label: "Starting…",
+    });
+    let failed = 0;
+    try {
+      for (let i = 0; i < courtSlotsToApply.length; i++) {
+        if (i > 0) await sleepMs(humanBookingPaceDelayMs());
+        const row = courtSlotsToApply[i]!;
+        setRosterImpactApplyProgress({
+          current: i + 1,
+          total: courtSlotsToApply.length,
+          label: `Week ${row.weekNumber} · Box ${row.boxNumber} · ${row.playDate} ${row.slotLabel}`,
+        });
+        const out = await api<{ ok: boolean; message: string; skipped?: boolean }>(
+          `/api/seasons/${seasonId}/house-league/roster-impact/apply-court-slot`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              weekNumber: row.weekNumber,
+              playDate: row.playDate,
+              slot: row.slot,
+              courtId: row.courtId,
+              boxNumber: row.boxNumber,
+              confirm: true,
+            }),
+          },
+        );
+        if (!out.ok) {
+          failed += 1;
+          onLog(`Court update failed: ${out.message}`);
+        }
+      }
+      await refreshRosterImpact();
+      await refreshLocalSeasonHolds();
+      const msg =
+        failed === 0
+          ? `Updated ${courtSlotsToApply.length} court booking${courtSlotsToApply.length === 1 ? "" : "s"} to match the live roster.`
+          : `${failed} of ${courtSlotsToApply.length} updates failed — see log.`;
+      onLog(msg);
+      window.alert(msg);
+      setRosterImpactApplyModalOpen(false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onLog(msg);
+      window.alert(msg);
+    } finally {
+      setRosterImpactApplyBusy(false);
+      setRosterImpactApplyProgress(null);
+    }
+  }, [
+    courtSlotsToApply,
+    seasonId,
+    onLog,
+    refreshRosterImpact,
+    refreshLocalSeasonHolds,
+  ]);
 
   const fetchSeasonBlockPreview = useCallback(
     async (opts?: { logToPanel?: boolean }) => {
@@ -1664,13 +2304,98 @@ export function BookingPage({
     [isBulkWeekStillHeld],
   );
 
+  const runSeasonWeekConversions = useCallback(
+    async (weeksToRun: number[]) => {
+      if (!seasonId || !activeSeasonHoldId || !startMondayForSeason || !activeSeasonHold) {
+        return { ok: false as const, message: "Missing season or active hold." };
+      }
+      const seasonWeeks = activeSeasonHold.seasonWeeks;
+      const sorted = [...weeksToRun]
+        .filter((w) => w >= 1 && w <= seasonWeeks && isBulkWeekStillHeld(w))
+        .sort((a, b) => a - b);
+      if (sorted.length === 0) {
+        return {
+          ok: false as const,
+          message: "No selected weeks still have a bulk hold.",
+        };
+      }
+      setConvertFeedback(null);
+      setConvertWeekLoading(true);
+      let stopMessage: string | null = null;
+      try {
+        for (const w of sorted) {
+          const res = await api<ConvertResult>(
+            `/api/seasons/${seasonId}/booking/convert`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                week: w,
+                holdId: activeSeasonHoldId,
+                confirm: true,
+                notifyOnDelete: true,
+              }),
+            },
+          );
+          onLog(JSON.stringify(res, null, 2));
+          if (res.status !== "ok" && res.status !== "partial") {
+            stopMessage = res.message;
+            break;
+          }
+        }
+        await refreshLocalSeasonHolds();
+        const viewedWeek = seasonCalendarWeekIndex + 1;
+        if (sorted.includes(viewedWeek)) {
+          const dates = seasonWeekPlayDatesWithRegistry(
+            startMondayForSeason,
+            viewedWeek,
+            holidayRegistry,
+          );
+          const q = new URLSearchParams({
+            mondayDate: dates.firstPlayDate,
+            tuesdayDate: dates.secondPlayDate,
+          });
+          const prev = await api<PreviewResult | { error: string }>(
+            `/api/seasons/${seasonId}/booking/weeks/${viewedWeek}/preview?${q.toString()}`,
+          );
+          setViewedWeekPreview(prev);
+        }
+        if (stopMessage) {
+          setConvertFeedback({ kind: "error", message: stopMessage });
+          return { ok: false as const, message: stopMessage };
+        }
+        const message =
+          sorted.length === 1
+            ? `Conversion complete for ${seasonBulkModalWeekLabel(sorted[0]!)}.`
+            : `Successfully converted ${sorted.length} weeks to match bookings.`;
+        setConvertFeedback({ kind: "ok", message });
+        return { ok: true as const, message };
+      } catch (e) {
+        const msg = String(e);
+        onLog(msg);
+        setConvertFeedback({ kind: "error", message: msg });
+        await refreshLocalSeasonHolds();
+        return { ok: false as const, message: msg };
+      } finally {
+        setConvertWeekLoading(false);
+      }
+    },
+    [
+      seasonId,
+      activeSeasonHoldId,
+      startMondayForSeason,
+      activeSeasonHold,
+      isBulkWeekStillHeld,
+      seasonCalendarWeekIndex,
+      holidayRegistry,
+      onLog,
+      refreshLocalSeasonHolds,
+    ],
+  );
+
   const submitConvertWeeksModal = useCallback(async () => {
-    if (!seasonId || !activeSeasonHoldId || !startMondayForSeason || !activeSeasonHold) {
-      return;
-    }
-    const seasonWeeks = activeSeasonHold.seasonWeeks;
+    if (!activeSeasonHold) return;
     const weeksToRun = [...convertWeeksModalSelected]
-      .filter((w) => w >= 1 && w <= seasonWeeks && isBulkWeekStillHeld(w))
+      .filter((w) => w >= 1 && w <= activeSeasonHold.seasonWeeks && isBulkWeekStillHeld(w))
       .sort((a, b) => a - b);
     if (weeksToRun.length === 0) {
       setConvertFeedback({
@@ -1679,63 +2404,121 @@ export function BookingPage({
       });
       return;
     }
+    const result = await runSeasonWeekConversions(weeksToRun);
+    if (result.ok) {
+      setConvertWeeksModalOpen(false);
+    }
+  }, [
+    activeSeasonHold,
+    convertWeeksModalSelected,
+    isBulkWeekStillHeld,
+    runSeasonWeekConversions,
+  ]);
+
+  const convertVisibleWeekToMatches = useCallback(async () => {
+    if (!activeSeasonHold || !activeSeasonHoldId) return;
+    const week = calendarWeekNumber;
+    if (week > activeSeasonHold.seasonWeeks) {
+      setConvertFeedback({
+        kind: "error",
+        message: `${seasonBulkModalWeekLabel(week)} is outside this season hold (${activeSeasonHold.seasonWeeks} weeks).`,
+      });
+      return;
+    }
+    if (!isBulkWeekStillHeld(week)) {
+      setConvertFeedback({
+        kind: "error",
+        message: bulkWeekConvertedToMatches
+          ? `${seasonBulkModalWeekLabel(week)} was already converted to match bookings.`
+          : `${seasonBulkModalWeekLabel(week)} has no bulk hold to convert.`,
+      });
+      return;
+    }
+    const weekLabel = seasonBulkModalWeekLabel(week);
+    if (
+      !window.confirm(
+        `Convert ${weekLabel} (the week shown in the calendar)?\n\n` +
+          "This deletes that week's bulk clinic holds in Club Locker and creates individual match reservations from the live US Squash box league roster (same matchups as the calendar with Player names checked).\n\n" +
+          "Club Locker will email every player on those new match bookings, and will send cancellation emails for the bulk clinics.\n\n" +
+          "Use this for a small test before converting all weeks at once.",
+      )
+    ) {
+      return;
+    }
+    await runSeasonWeekConversions([week]);
+  }, [
+    activeSeasonHold,
+    activeSeasonHoldId,
+    calendarWeekNumber,
+    bulkWeekConvertedToMatches,
+    isBulkWeekStillHeld,
+    runSeasonWeekConversions,
+  ]);
+
+  const rebookTuesdayForVisibleWeek = useCallback(async () => {
+    if (!seasonId || !activeSeasonHoldId || !startMondayForSeason) return;
+    if (!bulkWeekConvertedToMatches) {
+      setConvertFeedback({
+        kind: "error",
+        message: "This week is not marked converted — use Convert visible week first.",
+      });
+      return;
+    }
+    const week = calendarWeekNumber;
+    const playDates = seasonWeekPlayDatesWithRegistry(
+      startMondayForSeason,
+      week,
+      holidayRegistry,
+    );
+    const tuesdayDate = playDates.secondPlayDate;
+    const weekLabel = seasonBulkModalWeekLabel(week);
+    if (
+      !window.confirm(
+        `Re-book all Tuesday match reservations for ${weekLabel} (${formatISODateLongEn(tuesdayDate)})?\n\n` +
+          "Creates 16 individual match bookings (8 slots × Stadium + Center) from the live US Squash roster — same as the calendar with Player names checked.\n\n" +
+          "Does not touch Monday bookings or bulk holds. Club Locker will email players on each new match booking.\n\n" +
+          "Bookings are paced ~3–4 seconds apart.",
+      )
+    ) {
+      return;
+    }
     setConvertFeedback(null);
     setConvertWeekLoading(true);
-    let stopMessage: string | null = null;
     try {
-      for (const w of weeksToRun) {
-        const res = await api<ConvertResult>(
-          `/api/seasons/${seasonId}/booking/convert`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              week: w,
-              holdId: activeSeasonHoldId,
-              confirm: true,
-              notifyOnDelete: true,
-            }),
-          },
-        );
-        onLog(JSON.stringify(res, null, 2));
-        if (res.status !== "ok" && res.status !== "partial") {
-          stopMessage = res.message;
-          break;
-        }
-      }
-      await refreshLocalSeasonHolds();
-      const viewedWeek = seasonCalendarWeekIndex + 1;
-      if (weeksToRun.includes(viewedWeek)) {
-        const dates = seasonWeekPlayDatesWithRegistry(
-          startMondayForSeason,
-          viewedWeek,
-          holidayRegistry,
-        );
+      const res = await api<RebookPlayDayResult>(
+        `/api/seasons/${seasonId}/booking/rebook-play-day`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            week,
+            playDay: "tue",
+            holdId: activeSeasonHoldId,
+            startMondayDate: startMondayForSeason,
+            confirm: true,
+          }),
+        },
+      );
+      onLog(JSON.stringify(res, null, 2));
+      if (res.status === "ok" || res.status === "partial") {
+        setConvertFeedback({
+          kind: res.status === "ok" ? "ok" : "error",
+          message: res.message,
+        });
         const q = new URLSearchParams({
-          mondayDate: dates.firstPlayDate,
-          tuesdayDate: dates.secondPlayDate,
+          mondayDate: playDates.firstPlayDate,
+          tuesdayDate: playDates.secondPlayDate,
         });
         const prev = await api<PreviewResult | { error: string }>(
-          `/api/seasons/${seasonId}/booking/weeks/${viewedWeek}/preview?${q.toString()}`,
+          `/api/seasons/${seasonId}/booking/weeks/${week}/preview?${q.toString()}`,
         );
         setViewedWeekPreview(prev);
-      }
-      if (stopMessage) {
-        setConvertFeedback({ kind: "error", message: stopMessage });
       } else {
-        setConvertFeedback({
-          kind: "ok",
-          message:
-            weeksToRun.length === 1
-              ? "Conversion complete for the selected week."
-              : `Successfully converted ${weeksToRun.length} weeks to match bookings.`,
-        });
+        setConvertFeedback({ kind: "error", message: res.message });
       }
-      setConvertWeeksModalOpen(false);
     } catch (e) {
       const msg = String(e);
       onLog(msg);
       setConvertFeedback({ kind: "error", message: msg });
-      await refreshLocalSeasonHolds();
     } finally {
       setConvertWeekLoading(false);
     }
@@ -1743,13 +2526,10 @@ export function BookingPage({
     seasonId,
     activeSeasonHoldId,
     startMondayForSeason,
-    activeSeasonHold,
-    convertWeeksModalSelected,
-    isBulkWeekStillHeld,
-    seasonCalendarWeekIndex,
+    bulkWeekConvertedToMatches,
+    calendarWeekNumber,
     holidayRegistry,
     onLog,
-    refreshLocalSeasonHolds,
   ]);
 
   const runSeasonBulkSubmit = useCallback(
@@ -1962,6 +2742,178 @@ export function BookingPage({
     [seasonId, startMondayForSeason, calendarWeekNumber, onLog, refreshLocalSeasonHolds],
   );
 
+  const runStadiumIdMapTest = useCallback(
+    async (spec: { date: string; begin: string; end: string }) => {
+      if (!seasonId || !startMondayForSeason) return;
+      const playDates = seasonWeekPlayDatesWithRegistry(
+        startMondayForSeason,
+        calendarWeekNumber,
+        holidayRegistry,
+      );
+      const slotKey = `${spec.date}|${spec.begin}-${spec.end}`;
+      const stadiumLabel = slotPlayerLabelsForCalendar?.get(slotKey)?.stadium;
+      const testTimeLabel = `${formatHHMMAs12Hour("15:10")}–${formatHHMMAs12Hour("15:50")}`;
+      const confirmLines = [
+        `Book Stadium players at ${testTimeLabel} on ${formatISODateLongEn(spec.date)}?`,
+        stadiumLabel
+          ? `Players (from this slot): ${stadiumLabel.replace(/\s+v\s+/i, " vs ")}`
+          : "Players will be resolved from the live US Squash roster (same as Convert Visible Week).",
+        "",
+        "This creates one real Club Locker match on Stadium court. Members may receive booking emails.",
+      ];
+      if (
+        !window.confirm(
+          confirmLines.join("\n"),
+        )
+      ) {
+        return;
+      }
+      setStadiumIdMapTestLoading(true);
+      try {
+        const resp = await fetch(
+          `/api/seasons/${seasonId}/booking/test-stadium-id-map`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              week: calendarWeekNumber,
+              mondayDate: playDates.firstPlayDate,
+              tuesdayDate: playDates.secondPlayDate,
+              date: spec.date,
+              sourceBegin: spec.begin,
+              sourceEnd: spec.end,
+            }),
+          },
+        );
+        const rawText = await resp.text();
+        let res: {
+          ok?: boolean;
+          message?: string;
+          sourceMatch?: {
+            boxNumber: number;
+            player1SsmId: number;
+            player2SsmId: number;
+            player1Name: string;
+            player2Name: string;
+          };
+        };
+        try {
+          res = JSON.parse(rawText) as typeof res;
+        } catch {
+          window.alert(`Stadium ID-map test failed (${resp.status}): Non-JSON response.`);
+          onLog(rawText);
+          return;
+        }
+        onLog(rawText);
+        const detail = res.sourceMatch
+          ? ` Box ${res.sourceMatch.boxNumber}: ${res.sourceMatch.player1Name} (id ${res.sourceMatch.player1SsmId}) vs ${res.sourceMatch.player2Name} (id ${res.sourceMatch.player2SsmId}).`
+          : "";
+        const msg = `${res.message ?? "Request failed."}${detail}`;
+        if (res.ok && resp.status < 400) {
+          window.alert(`Stadium ID-map test booked.\n\n${msg}`);
+        } else {
+          window.alert(`Stadium ID-map test failed (${resp.status}).\n\n${msg}`);
+        }
+      } catch (e) {
+        const msg = String(e);
+        onLog(msg);
+        window.alert(msg);
+      } finally {
+        setStadiumIdMapTestLoading(false);
+      }
+    },
+    [
+      seasonId,
+      startMondayForSeason,
+      calendarWeekNumber,
+      holidayRegistry,
+      slotPlayerLabelsForCalendar,
+      onLog,
+    ],
+  );
+
+  const runBookSlotBothCourtsNoBulkCancel = useCallback(
+    async (spec: { date: string; begin: string; end: string }) => {
+      if (!seasonId || !startMondayForSeason) return;
+      const playDates = seasonWeekPlayDatesWithRegistry(
+        startMondayForSeason,
+        calendarWeekNumber,
+        holidayRegistry,
+      );
+      const slotKey = `${spec.date}|${spec.begin}-${spec.end}`;
+      const labels = slotPlayerLabelsForCalendar?.get(slotKey);
+      const formatCourtLine = (
+        court: "Stadium" | "Center",
+        label: string | undefined,
+      ): string => {
+        if (!label || isVacantCourtChipLabel(label)) {
+          return `${court}: (no match from roster)`;
+        }
+        return `${court}: ${label.replace(/\s+v\s+/i, " vs ")}`;
+      };
+      const timeLabel = `${formatHHMMAs12Hour(spec.begin)}–${formatHHMMAs12Hour(spec.end)}`;
+      const confirmLines = [
+        `Confirm booking for ${formatISODateLongEn(spec.date)} · ${timeLabel}`,
+        "",
+        formatCourtLine("Stadium", labels?.stadium),
+        formatCourtLine("Center", labels?.center),
+        "",
+        "Creates real Club Locker match reservations on both courts when the roster has players for each. The green bulk hold is not cancelled. Members may receive booking emails.",
+      ];
+      if (!window.confirm(confirmLines.join("\n"))) {
+        return;
+      }
+      setBookSlotBothCourtsLoading(true);
+      try {
+        const resp = await fetch(
+          `/api/seasons/${seasonId}/booking/book-slot-both-courts`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              week: calendarWeekNumber,
+              mondayDate: playDates.firstPlayDate,
+              tuesdayDate: playDates.secondPlayDate,
+              date: spec.date,
+              begin: spec.begin,
+              end: spec.end,
+            }),
+          },
+        );
+        const rawText = await resp.text();
+        let res: { ok?: boolean; message?: string; courts?: unknown[] };
+        try {
+          res = JSON.parse(rawText) as typeof res;
+        } catch {
+          window.alert(`Booking failed (${resp.status}): Non-JSON response.`);
+          onLog(rawText);
+          return;
+        }
+        onLog(rawText);
+        const msg = res.message ?? "Request failed.";
+        if (res.ok && resp.status < 400) {
+          window.alert(`Booked.\n\n${msg}`);
+        } else {
+          window.alert(`Booking failed (${resp.status}).\n\n${msg}`);
+        }
+      } catch (e) {
+        const msg = String(e);
+        onLog(msg);
+        window.alert(msg);
+      } finally {
+        setBookSlotBothCourtsLoading(false);
+      }
+    },
+    [
+      seasonId,
+      startMondayForSeason,
+      calendarWeekNumber,
+      holidayRegistry,
+      slotPlayerLabelsForCalendar,
+      onLog,
+    ],
+  );
+
   const cancelBookingsSelectableIds = useMemo(
     () => cancelBookingsRows.filter((r) => r.complete).map((r) => r.rowId),
     [cancelBookingsRows],
@@ -2061,12 +3013,59 @@ export function BookingPage({
                 >
                   Copy full JSON to log
                 </button>
+                <label
+                  className="booking-matchup-names-toggle"
+                  title={
+                    boxLeaguePlayers?.length
+                      ? seasonStartPlayers.length > 0
+                        ? "Matchup names use season-start seat mapping (live Club Locker roster for player ids)"
+                        : "Matchup names from live Club Locker box order — save Season start roster for seat mapping"
+                      : "Load a box league roster on the Boxes tab first"
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={showMatchupPlayerNames}
+                    disabled={!boxLeaguePlayers?.length}
+                    onChange={(e) => setShowMatchupPlayerNames(e.target.checked)}
+                  />
+                  Player names
+                </label>
               </div>
             </div>
             {seasonPreviewError ? (
               <p className="weekly-empty" style={{ marginTop: "0.75rem" }}>
                 Preview failed: {seasonPreviewError}
               </p>
+            ) : null}
+            {rosterImpactLoading ? (
+              <p className="weekly-meta" style={{ marginTop: "0.5rem" }}>
+                Checking converted match bookings against live roster…
+              </p>
+            ) : null}
+            {!rosterImpactLoading &&
+            courtSlotsToApply.length > 0 &&
+            (activeSeasonHold?.convertedWeeks?.length ?? 0) > 0 ? (
+              <div
+                className="houseleague-banner roster-impact-banner booking-roster-impact-banner"
+                role="status"
+                style={{ marginTop: "0.75rem" }}
+              >
+                <strong>
+                  {courtSlotsToApply.length} managed court booking
+                  {courtSlotsToApply.length === 1 ? "" : "s"}
+                </strong>{" "}
+                (boxes 1–16) differ from the live US Squash roster across converted
+                weeks.
+                {bulkWeekConvertedToMatches && visibleWeekCourtSlotsNeedingUpdate > 0 ? (
+                  <>
+                    {" "}
+                    This week:{" "}
+                    <strong>{visibleWeekCourtSlotsNeedingUpdate}</strong> highlighted on
+                    the calendar.
+                  </>
+                ) : null}
+              </div>
             ) : null}
             {seasonPreview ? (
               <div
@@ -2083,21 +3082,34 @@ export function BookingPage({
                   onWeekIndexChange={setSeasonCalendarWeekIndex}
                   booked={seasonBlockBooked}
                   bulkWeekConvertedToMatches={bulkWeekConvertedToMatches}
+                  locallyConvertedSlotKeys={
+                    activeSeasonHold?.locallyConvertedSlotKeys
+                  }
                   slotPlayerLabels={slotPlayerLabelsForCalendar}
+                  showMatchupPlayerNames={showMatchupPlayerNames}
+                  boxLeaguePlayers={boxLeaguePlayers}
+                  seasonStartPlayers={
+                    seasonStartPlayers.length > 0 ? seasonStartPlayers : undefined
+                  }
                   onBulkSlotContextMenu={openBulkSlotContextMenu}
                   onReservedSlotContextMenu={openReservedSlotContextMenu}
                   statHolidayRegistry={holidayRegistry}
+                  rosterImpactHighlight={rosterImpactHighlight}
                 />
                 <p className="weekly-meta" style={{ marginTop: "0.5rem", marginBottom: 0 }}>
                   Tip: <strong>Right-click</strong> empty areas or blue preview blocks to{" "}
-                  <strong>book</strong> a single-court test match (snaps to real{" "}
-                  <strong>40‑minute</strong> league windows). <strong>Right-click green</strong> bulk
-                  holds and choose <strong>Book… (replace green bulk)</strong> to clear that slot’s
-                  bulk hold on <strong>the court you select in the dialog</strong> (no member emails for
-                  the cancel step), then create a two-player match there. <strong>Right-click green</strong> or <strong>violet</strong> blocks to{" "}
+                  <strong>book</strong> a single-court match in Club Locker, or{" "}
+                  <strong>mark the visible week</strong> as bulk-held or converted{" "}
+                  <strong>locally only</strong> (aligns calendar with Club Locker without API calls).{" "}
+                  <strong>Right-click green</strong>: <strong>Show this slot as converted</strong> for
+                  one time row (purple, local only), or <strong>Show whole week…</strong> for every
+                  slot that week.                   <strong>Book match in Club Locker… (no bulk cancel)</strong> confirms both
+                  courts from the live roster. <strong>…(cancel bulk hold first)</strong> books one
+                  court after clearing bulk.{" "}
+                  <strong>Test: book Stadium players at 3:10 PM…</strong> uses live-roster IDs.{" "}
+                  <strong>Right-click green</strong> or <strong>violet</strong> blocks to{" "}
                   <strong>cancel</strong> that time row (both courts). Use{" "}
-                  <strong>Cancel bookings…</strong> for multi-select. Per-slot replace needs the
-                  expanded season-hold layout (same as per-slot cancel).
+                  <strong>Cancel bookings…</strong> for multi-select.
                 </p>
               </div>
             ) : !seasonPreviewLoading && seasonId ? (
@@ -2140,8 +3152,13 @@ export function BookingPage({
             <div className="row" style={{ marginTop: "0.5rem" }}>
               <button
                 type="button"
-                className="primary"
+                className={seasonBlockBooked ? "secondary" : "primary"}
                 disabled={!seasonId || !startMondayForSeason || seasonBulkSubmitting}
+                title={
+                  seasonBlockBooked
+                    ? "Bulk holds are active for this start Monday. Open to add more weeks or re-run after a partial failure."
+                    : "Create bulk clinic holds in Club Locker for the selected weeks."
+                }
                 onClick={() => {
                   setSeasonBulkRunDraftWeeks(
                     Math.max(weeksToBook, minBulkRunDraftWeeks),
@@ -2149,18 +3166,64 @@ export function BookingPage({
                   setSeasonBulkRunModalOpen(true);
                 }}
               >
-                Run season block (bulk)
+                {seasonBlockBooked ? "Extend season block…" : "Run season block (bulk)"}
               </button>
               {hasActiveSeasonHoldForConvert && activeSeasonHoldId ? (
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!seasonId || convertWeekLoading || !activeSeasonHoldId}
-                  title="Choose which season weeks to convert from bulk clinics to individual match bookings."
-                  onClick={openConvertWeeksModal}
-                >
-                  {convertWeekLoading ? "Converting weeks…" : "Convert weeks to matches"}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={
+                      !seasonId ||
+                      convertWeekLoading ||
+                      !activeSeasonHoldId ||
+                      !visibleWeekCanConvert
+                    }
+                    title={
+                      bulkWeekConvertedToMatches
+                        ? "This calendar week was already converted to match bookings."
+                        : !visibleWeekCanConvert
+                          ? "Navigate to a week that still has a bulk hold, or extend the season block first."
+                          : "Delete this week's bulk clinics and create individual match bookings from the week plan (sends Club Locker emails for this week only)."
+                    }
+                    onClick={() => {
+                      void convertVisibleWeekToMatches();
+                    }}
+                  >
+                    {convertWeekLoading
+                      ? "Converting week…"
+                      : `Convert visible week (${seasonBulkModalWeekLabel(calendarWeekNumber)})`}
+                  </button>
+                  {bulkWeekConvertedToMatches ? (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={
+                        !seasonId ||
+                        convertWeekLoading ||
+                        !activeSeasonHoldId ||
+                        calendarWeekNumber > REGULAR_SEASON_WEEKS_IN_CALENDAR
+                      }
+                      title="Create Tuesday match bookings only for this converted week (skips bulk delete and Monday)."
+                      onClick={() => {
+                        void rebookTuesdayForVisibleWeek();
+                      }}
+                    >
+                      {convertWeekLoading
+                        ? "Re-booking Tuesday…"
+                        : `Re-book Tuesday (${seasonBulkModalWeekLabel(calendarWeekNumber)})`}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={!seasonId || convertWeekLoading || !activeSeasonHoldId}
+                    title="Choose which season weeks to convert from bulk clinics to individual match bookings."
+                    onClick={openConvertWeeksModal}
+                  >
+                    {convertWeekLoading ? "Converting weeks…" : "Convert weeks to matches…"}
+                  </button>
+                </>
               ) : null}
               <button
                 type="button"
@@ -2352,6 +3415,114 @@ export function BookingPage({
               Book…
             </button>
           ) : null}
+          {slotContextMenu.mode === "book" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                setSlotContextMenu(null);
+                void markVisibleWeekDisplayLocal("bulk_held");
+              }}
+            >
+              Show week as bulk-held (green, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "book" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                const s = slotContextMenu;
+                setSlotContextMenu(null);
+                void markSlotDisplayLocal(
+                  { date: s.date, begin: s.begin, end: s.end },
+                  "converted",
+                );
+              }}
+            >
+              Show this slot as converted (purple, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "book" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                setSlotContextMenu(null);
+                void markVisibleWeekDisplayLocal("converted");
+              }}
+            >
+              Show whole week as converted (purple, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "bulk" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                const s = slotContextMenu;
+                setSlotContextMenu(null);
+                void markSlotDisplayLocal(
+                  { date: s.date, begin: s.begin, end: s.end },
+                  "converted",
+                );
+              }}
+            >
+              Show this slot as converted (purple, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "bulk" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                setSlotContextMenu(null);
+                void markVisibleWeekDisplayLocal("converted");
+              }}
+            >
+              Show whole week as converted (purple, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "bulk" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                setSlotContextMenu(null);
+                void markVisibleWeekDisplayLocal("bulk_held");
+              }}
+            >
+              Show whole week as bulk-held (green, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "bulk" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={
+                bookSlotBothCourtsLoading || !seasonId || !startMondayForSeason
+              }
+              onClick={() => {
+                const s = slotContextMenu;
+                setSlotContextMenu(null);
+                void runBookSlotBothCourtsNoBulkCancel({
+                  date: s.date,
+                  begin: s.begin,
+                  end: s.end,
+                });
+              }}
+            >
+              {bookSlotBothCourtsLoading
+                ? "Booking both courts…"
+                : "Book match in Club Locker… (no bulk cancel)"}
+            </button>
+          ) : null}
           {slotContextMenu.mode === "bulk" ? (
             <button
               type="button"
@@ -2370,7 +3541,7 @@ export function BookingPage({
                 setSlotContextMenu(null);
               }}
             >
-              Book… (replace green bulk)
+              Book match in Club Locker… (cancel bulk hold first)
             </button>
           ) : null}
           {slotContextMenu.mode === "bulk" ? (
@@ -2398,7 +3569,58 @@ export function BookingPage({
               Cancel bulk slot (both courts)…
             </button>
           ) : null}
+          {slotContextMenu.mode === "bulk" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={stadiumIdMapTestLoading || !seasonId || !startMondayForSeason}
+              onClick={() => {
+                const s = slotContextMenu;
+                setSlotContextMenu(null);
+                void runStadiumIdMapTest({
+                  date: s.date,
+                  begin: s.begin,
+                  end: s.end,
+                });
+              }}
+            >
+              {stadiumIdMapTestLoading
+                ? "Booking Stadium test at 3:10 PM…"
+                : "Test: book Stadium players at 3:10 PM…"}
+            </button>
+          ) : null}
           {slotContextMenu.mode === "match" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                const s = slotContextMenu;
+                setSlotContextMenu(null);
+                void markSlotDisplayLocal(
+                  { date: s.date, begin: s.begin, end: s.end },
+                  "bulk_held",
+                );
+              }}
+            >
+              Show this slot as bulk-held (green, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "match" ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!seasonId || !startMondayForSeason}
+              onClick={() => {
+                setSlotContextMenu(null);
+                void markVisibleWeekDisplayLocal("bulk_held");
+              }}
+            >
+              Show whole week as bulk-held (green, local only)
+            </button>
+          ) : null}
+          {slotContextMenu.mode === "match" &&
+          bulkWeekConvertedToMatches ? (
             <button
               type="button"
               role="menuitem"
@@ -2420,7 +3642,7 @@ export function BookingPage({
                 });
               }}
             >
-              Cancel match bookings (both courts)…
+              Cancel match bookings in Club Locker (both courts)…
             </button>
           ) : null}
         </div>
@@ -2444,12 +3666,14 @@ export function BookingPage({
             style={{ maxWidth: "28rem" }}
           >
             <h3 id="booking-season-bulk-run-title" style={{ marginTop: 0 }}>
-              Run season block (bulk)
+              {seasonBlockBooked ? "Extend season block" : "Run season block (bulk)"}
             </h3>
             <p className="weekly-meta" style={{ marginTop: 0 }}>
-              This creates one clinic per court for each play day in the weeks you include. Selection
-              is consecutive from week 1 through the last week you check. Weeks that still have an
-              active bulk hold are selected and cannot be changed.
+              {seasonBlockBooked
+                ? "Bulk holds are already active for this start Monday. Add more weeks or re-run after a partial failure."
+                : "This creates one clinic per court for each play day in the weeks you include."}{" "}
+              Selection is consecutive from week 1 through the last week you check. Weeks that still
+              have an active bulk hold are selected and cannot be changed.
             </p>
             <ul
               style={{
@@ -2581,8 +3805,9 @@ export function BookingPage({
             </h3>
             <p className="weekly-meta" style={{ marginTop: 0 }}>
               For each week you select, this deletes that week&apos;s bulk block reservations in Club
-              Locker and creates individual match reservations from the week plan. Weeks already
-              converted are shown for reference only.
+              Locker and creates individual match reservations from the live US Squash box league
+              roster (same geometry as the calendar). Weeks already converted are shown for
+              reference only.
             </p>
             <ul
               style={{
@@ -3056,13 +4281,30 @@ export function BookingPage({
                           }),
                         });
                         if (!cancelRes.ok) {
-                          setSingleBookFeedback(
-                            `Could not clear bulk hold: ${cancelRes.error}`,
+                          const errText = cancelRes.error;
+                          const mayProceed =
+                            /missing reservation id/i.test(errText) ||
+                            /nothing to cancel/i.test(errText) ||
+                            /no season hold/i.test(errText) ||
+                            /legacy reservation id layout/i.test(errText);
+                          if (
+                            !mayProceed ||
+                            !window.confirm(
+                              `Could not clear bulk hold in Club Locker:\n${errText}\n\nContinue and create the match anyway? (Use this when there is no bulk block in Club Locker for that day.)`,
+                            )
+                          ) {
+                            setSingleBookFeedback(
+                              `Could not clear bulk hold: ${errText}`,
+                            );
+                            return;
+                          }
+                          onLog(
+                            `Skipped bulk cancel (${errText}); booking match in Club Locker only.`,
                           );
-                          return;
+                        } else {
+                          onLog(cancelRes.message);
+                          void refreshLocalSeasonHolds();
                         }
-                        onLog(cancelRes.message);
-                        void refreshLocalSeasonHolds();
                       }
                       const webPayload = {
                         date: singleBookDraft.date,
@@ -3114,6 +4356,104 @@ export function BookingPage({
                   : singleBookReplacesBulkHold
                     ? "Clear bulk & confirm match"
                     : "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {courtSlotsToApply.length > 0 ? (
+        <div className="booking-roster-update-bar" role="region" aria-label="Roster court updates">
+          <p className="booking-roster-update-bar-text">
+            <strong>{courtSlotsToApply.length}</strong> match booking
+            {courtSlotsToApply.length === 1 ? "" : "s"} need updates to match the live
+            roster (boxes 1–16).
+            {rosterImpactApplyProgress ? (
+              <span className="booking-roster-update-bar-progress">
+                {" "}
+                Updating {rosterImpactApplyProgress.current} of{" "}
+                {rosterImpactApplyProgress.total}: {rosterImpactApplyProgress.label}
+              </span>
+            ) : null}
+          </p>
+          <button
+            type="button"
+            className="primary"
+            disabled={rosterImpactApplyBusy}
+            onClick={() => setRosterImpactApplyModalOpen(true)}
+          >
+            {rosterImpactApplyBusy ? "Updating bookings…" : "Make all updates"}
+          </button>
+        </div>
+      ) : null}
+
+      {rosterImpactApplyModalOpen ? (
+        <div
+          className="booking-single-match-backdrop"
+          role="presentation"
+          onMouseDown={(ev) => {
+            if (ev.target === ev.currentTarget && !rosterImpactApplyBusy) {
+              setRosterImpactApplyModalOpen(false);
+            }
+          }}
+        >
+          <div
+            className="booking-single-match-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="booking-roster-updates-title"
+            style={{ maxWidth: "32rem" }}
+          >
+            <h3 id="booking-roster-updates-title" style={{ marginTop: 0 }}>
+              Update court bookings?
+            </h3>
+            <p className="weekly-meta" style={{ marginTop: 0 }}>
+              This will update <strong>{courtSlotsToApply.length}</strong> individual
+              match reservation
+              {courtSlotsToApply.length === 1 ? "" : "s"} in Club Locker (boxes 1–16
+              only), one at a time with about five seconds between each. Members may
+              receive booking emails when reservations are replaced.
+            </p>
+            {(rosterImpact?.blockers.length ?? 0) > 0 ? (
+              <p className="weekly-meta" role="note">
+                Note: some weeks have incomplete rosters (e.g. empty seats). Stale
+                bookings will be cancelled; new bookings for those matchups are skipped
+                until the roster is filled.
+              </p>
+            ) : null}
+            <div className="booking-single-match-actions">
+              <button
+                type="button"
+                className="secondary"
+                disabled={rosterImpactApplyBusy}
+                onClick={() => setRosterImpactApplyModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={
+                  rosterImpactApplyBusy || courtSlotsToApply.length === 0
+                }
+                aria-busy={rosterImpactApplyBusy}
+                onClick={() => {
+                  void applyAllRosterCourtUpdates();
+                }}
+              >
+                {rosterImpactApplyBusy ? (
+                  <span className="booking-async-btn-inner">
+                    <Loader2
+                      className="booking-async-spinner"
+                      size={13}
+                      aria-hidden
+                      strokeWidth={2}
+                    />
+                    Updating…
+                  </span>
+                ) : (
+                  "Confirm"
+                )}
               </button>
             </div>
           </div>

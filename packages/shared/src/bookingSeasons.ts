@@ -203,6 +203,54 @@ export function defaultBookingSeasonAndStartMonday(
   };
 }
 
+/**
+ * The booking segment whose interval contains the local calendar date `startMondayISO`
+ * (interpreted around local noon), paired with its club-booking year. Used when persisting season rows from a picked start Monday.
+ */
+export function bookingCalendarClubYearSegmentForMondayISO(
+  startMondayISO: string,
+): { segment: BookingCalendarSeason; clubYear: number } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(startMondayISO.trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const monthIdx = Number(m[2]) - 1;
+  const dom = Number(m[3]);
+  if (
+    !Number.isFinite(year) ||
+    monthIdx < 0 ||
+    monthIdx > 11 ||
+    dom < 1 ||
+    dom > 31
+  ) {
+    return null;
+  }
+  const day = new Date(year, monthIdx, dom, 12, 0, 0, 0);
+  if (Number.isNaN(day.getTime())) return null;
+  const Y = bookingClubYearContainingDate(day);
+  return {
+    segment: seasonContainingDateInClubYear(Y, day),
+    clubYear: Y,
+  };
+}
+
+/**
+ * Next booking calendar segment strictly after `currentSegment` within club-booking `clubYear`,
+ * and that segment instance’s start Monday ISO (Winter rolls into the next club-booking cycle).
+ */
+export function bookingSeasonImmediatelyFollowing(
+  currentSegment: BookingCalendarSeason,
+  clubBookingYear: number,
+): DefaultBookingSeasonResult {
+  const nextKey = nextSeasonKey(currentSegment);
+  const d = seasonStartForClubYearOrNextWinter(nextKey, clubBookingYear);
+  const day = startOfLocalCalendarDay(d);
+  return {
+    season: nextKey,
+    startMondayISO: formatLocalISODate(d),
+    clubYear: bookingClubYearContainingDate(day),
+  };
+}
+
 export function bookingCalendarSeasonLabel(s: BookingCalendarSeason): string {
   switch (s) {
     case "winter":
@@ -214,4 +262,76 @@ export function bookingCalendarSeasonLabel(s: BookingCalendarSeason): string {
     case "fall":
       return "Fall";
   }
+}
+
+/** First `YYYY-MM-DD` in `iso` interpreted as that local calendar day (for DB `end_date` / timestamps). */
+function parseIsoPrefixToLocalCalendarDay(iso: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso.trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d))
+    return null;
+  const result = new Date(y, mo - 1, d);
+  return Number.isNaN(result.getTime()) ? null : startOfLocalCalendarDay(result);
+}
+
+/**
+ * Whether a club-booking segment row should be treated as active for roster maintenance:
+ * today is within [segmentStart, nextSegmentStart), using local calendar dates, unless an
+ * explicit `explicitSeasonEndDate` is set — then today must be ≥ segmentStart and ≤ that
+ * inclusive end calendar day (typical `seasons.end_date` / US Squash end timestamp).
+ */
+export function isBookingCalendarSegmentLocallyActive(args: {
+  segment: BookingCalendarSeason;
+  clubYear: number;
+  now?: Date;
+  explicitSeasonEndDate?: string | null;
+}): boolean {
+  const now = args.now ?? new Date();
+  const today = startOfLocalCalendarDay(now);
+  const segmentStart = startOfLocalCalendarDay(
+    seasonStartMondayLocal(args.segment, args.clubYear),
+  );
+  if (today < segmentStart) return false;
+
+  const rawEnd = args.explicitSeasonEndDate;
+  if (rawEnd != null && String(rawEnd).trim() !== "") {
+    const explicitDay = parseIsoPrefixToLocalCalendarDay(String(rawEnd));
+    if (explicitDay != null) return today <= explicitDay;
+  }
+
+  const nextStart = startOfLocalCalendarDay(
+    nextSeasonStartAfter(args.clubYear, args.segment),
+  );
+  return today < nextStart;
+}
+
+/**
+ * Live US Squash house league roster edits: editable while local calendar “today” is on or
+ * before the league event’s advertised `endDate` (YYYY-MM-DD prefix — same convention as UI).
+ * Preparation before opening day is allowed unless `enforceStart` is true.
+ */
+export function isUsSquashBoxLeagueRosterLocallyEditable(args: {
+  now?: Date;
+  eventStartISO?: string | null;
+  eventEndISO?: string | null;
+  enforceStart?: boolean;
+}): boolean {
+  const today = startOfLocalCalendarDay(args.now ?? new Date());
+  const endRaw = args.eventEndISO;
+  if (endRaw == null || String(endRaw).trim() === "") return false;
+  const endDay = parseIsoPrefixToLocalCalendarDay(String(endRaw));
+  if (endDay == null) return false;
+  if (today > endDay) return false;
+
+  if (args.enforceStart === true) {
+    const st = args.eventStartISO;
+    if (st != null && String(st).trim() !== "") {
+      const startDay = parseIsoPrefixToLocalCalendarDay(String(st));
+      if (startDay != null && today < startDay) return false;
+    }
+  }
+  return true;
 }

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  bookingCalendarClubYearSegmentForMondayISO,
   bookingClubYearContainingDate,
+  bookingSeasonImmediatelyFollowing,
   defaultBookingSeasonAndStartMonday,
   fallStartMondayLocal,
   formatLocalISODate,
+  isBookingCalendarSegmentLocallyActive,
+  isUsSquashBoxLeagueRosterLocallyEditable,
   springStartMondayLocal,
   summerStartMondayLocal,
   winterStartMondayLocal,
@@ -65,5 +69,137 @@ describe("default season (4-week threshold)", () => {
 describe("bookingClubYearContainingDate", () => {
   it("early Jan before winter start belongs to previous club year", () => {
     expect(bookingClubYearContainingDate(localYMD(2026, 1, 2))).toBe(2025);
+  });
+});
+
+describe("bookingSeasonImmediatelyFollowing", () => {
+  it("winter club year rolls to Spring in same booking year", () => {
+    const r = bookingSeasonImmediatelyFollowing("winter", 2026);
+    expect(r.season).toBe("spring");
+    expect(r.startMondayISO).toBe("2026-04-06");
+  });
+
+  it("Fall advances to Winter in the following club-booking cycle", () => {
+    const r = bookingSeasonImmediatelyFollowing("fall", 2026);
+    expect(r.season).toBe("winter");
+    expect(r.startMondayISO).toBe(formatLocalISODate(winterStartMondayLocal(2027)));
+    expect(r.clubYear).toBe(2027);
+  });
+});
+
+describe("bookingCalendarClubYearSegmentForMondayISO", () => {
+  it("places spring start Monday correctly", () => {
+    expect(bookingCalendarClubYearSegmentForMondayISO("2026-04-06")).toEqual({
+      segment: "spring",
+      clubYear: 2026,
+    });
+  });
+
+  it("rejects malformed dates", () => {
+    expect(bookingCalendarClubYearSegmentForMondayISO("nope")).toBeNull();
+  });
+});
+
+describe("isBookingCalendarSegmentLocallyActive", () => {
+  it("Summer 2026 active on Sep 14 (before Fall start)", () => {
+    expect(
+      isBookingCalendarSegmentLocallyActive({
+        segment: "summer",
+        clubYear: 2026,
+        now: localYMD(2026, 9, 14),
+      }),
+    ).toBe(true);
+  });
+
+  it("Summer 2026 inactive on Fall start Monday", () => {
+    expect(
+      isBookingCalendarSegmentLocallyActive({
+        segment: "summer",
+        clubYear: 2026,
+        now: fallStartMondayLocal(2026),
+      }),
+    ).toBe(false);
+  });
+
+  it("respects explicit end_date before next segment starts", () => {
+    expect(
+      isBookingCalendarSegmentLocallyActive({
+        segment: "summer",
+        clubYear: 2026,
+        now: localYMD(2026, 9, 1),
+        explicitSeasonEndDate: "2026-08-31",
+      }),
+    ).toBe(false);
+    expect(
+      isBookingCalendarSegmentLocallyActive({
+        segment: "summer",
+        clubYear: 2026,
+        now: localYMD(2026, 8, 31),
+        explicitSeasonEndDate: "2026-08-31T23:59:59Z",
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("isUsSquashBoxLeagueRosterLocallyEditable", () => {
+  it("allows prep before league start until end date (Summer example)", () => {
+    expect(
+      isUsSquashBoxLeagueRosterLocallyEditable({
+        eventStartISO: "2026-06-01T00:00:00",
+        eventEndISO: "2026-07-27T00:00:00",
+        now: localYMD(2026, 5, 14),
+        enforceStart: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("still allows edits on opening day before end", () => {
+    expect(
+      isUsSquashBoxLeagueRosterLocallyEditable({
+        eventStartISO: "2026-06-01T00:00:00",
+        eventEndISO: "2026-07-27T00:00:00",
+        now: localYMD(2026, 6, 15),
+      }),
+    ).toBe(true);
+  });
+
+  it("closes after end inclusive day", () => {
+    expect(
+      isUsSquashBoxLeagueRosterLocallyEditable({
+        eventStartISO: "2026-06-01T00:00:00",
+        eventEndISO: "2026-07-27T00:00:00",
+        now: localYMD(2026, 7, 28),
+      }),
+    ).toBe(false);
+  });
+
+  it("enforceStart closes before opening day", () => {
+    expect(
+      isUsSquashBoxLeagueRosterLocallyEditable({
+        eventStartISO: "2026-06-01T00:00:00",
+        eventEndISO: "2026-07-27T00:00:00",
+        now: localYMD(2026, 5, 14),
+        enforceStart: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("spring league window covers mid-run (March–May)", () => {
+    expect(
+      isUsSquashBoxLeagueRosterLocallyEditable({
+        eventStartISO: "2026-03-30T00:00:00",
+        eventEndISO: "2026-05-25T00:00:00",
+        now: localYMD(2026, 5, 14),
+      }),
+    ).toBe(true);
+  });
+
+  it("needs a parseable end date", () => {
+    expect(
+      isUsSquashBoxLeagueRosterLocallyEditable({
+        eventEndISO: "",
+        now: localYMD(2026, 5, 14),
+      }),
+    ).toBe(false);
   });
 });

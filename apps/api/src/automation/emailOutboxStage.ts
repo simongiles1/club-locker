@@ -38,8 +38,9 @@ export async function stageAndMaybeSend(
     meta: email.meta,
   });
   if (!sendRes.ok) return { outboxId, sent: false };
+  const ts = new Date().toISOString();
   db.update(emailOutbox)
-    .set({ status: "sent" })
+    .set({ status: "sent", sentAt: ts })
     .where(eq(emailOutbox.id, outboxId))
     .run();
   return { outboxId, sent: true };

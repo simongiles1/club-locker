@@ -24,6 +24,7 @@ export function ensureStatutoryHolidaysSeeded(db: Db): void {
           openTime: h.hours.open,
           closeTime: h.hours.close,
           closed: h.hours.closed ? 1 : 0,
+          closureKind: "holiday",
         })
         .run();
     }

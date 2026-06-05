@@ -1,10 +1,18 @@
 import nodemailer, { type Transporter } from "nodemailer";
 
+/** Optional attachment forwarded to transports that support it (e.g. Gmail SMTP). */
+export type OutboundAttachment = {
+  filename: string;
+  content: Buffer | string;
+  contentType?: string;
+};
+
 export type OutboundEmail = {
   to: string;
   subject: string;
   body: string;
   meta?: Record<string, unknown>;
+  attachments?: OutboundAttachment[];
 };
 
 export interface EmailAdapter {
@@ -13,7 +21,18 @@ export interface EmailAdapter {
 
 export class ConsoleEmailAdapter implements EmailAdapter {
   async send(email: OutboundEmail) {
-    console.log("[email:console]", JSON.stringify(email, null, 2));
+    const redacted = {
+      ...email,
+      attachments: email.attachments?.map((a) => ({
+        filename: a.filename,
+        contentType: a.contentType,
+        contentBytes:
+          typeof a.content === "string"
+            ? Buffer.byteLength(a.content, "utf8")
+            : a.content.byteLength,
+      })),
+    };
+    console.log("[email:console]", JSON.stringify(redacted, null, 2));
     return { ok: true as const };
   }
 }
@@ -72,6 +91,14 @@ export class GmailEmailAdapter implements EmailAdapter {
         to: email.to,
         subject: email.subject,
         text: email.body,
+        attachments: email.attachments?.length
+          ? email.attachments.map((a) => ({
+              filename: a.filename,
+              content: a.content,
+              contentType:
+                a.contentType ?? "application/octet-stream; charset=utf-8",
+            }))
+          : undefined,
       });
       return { ok: true as const };
     } catch (err) {

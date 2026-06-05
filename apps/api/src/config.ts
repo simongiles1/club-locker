@@ -41,7 +41,8 @@ const envSchema = z.object({
   US_SQUASH_CLUB_ID: z.coerce.number().default(10_706),
   US_SQUASH_COURT_1_ID: z.coerce.number().default(3_510),
   US_SQUASH_COURT_2_ID: z.coerce.number().default(3_512),
-  US_SQUASH_CUSTOM_MATCH_TYPE: z.coerce.number().default(457),
+  /** Club Locker custom match type id for house league bookings (Admin → match types). */
+  US_SQUASH_CUSTOM_MATCH_TYPE: z.coerce.number().default(460),
   /**
    * Page size when walking `members2` with `limit`/`offset` (live mode). If the first
    * bare response has exactly this many rows, the client fetches further pages.

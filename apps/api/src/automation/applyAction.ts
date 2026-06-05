@@ -62,7 +62,11 @@ async function stageMaybeSend(
       .run();
     return { outboxId: id, sent: false };
   }
-  db.update(emailOutbox).set({ status: "sent" }).where(eq(emailOutbox.id, id)).run();
+  const ts = new Date().toISOString();
+  db.update(emailOutbox)
+    .set({ status: "sent", sentAt: ts })
+    .where(eq(emailOutbox.id, id))
+    .run();
   return { outboxId: id, sent: true };
 }
 

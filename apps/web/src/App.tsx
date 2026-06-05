@@ -18,8 +18,12 @@ type Season = {
   clubYear: number | null;
   calendarSegment: string | null;
   startMondayDate: string | null;
+  /** Caps active window when present (YYYY-MM-DD or ISO timestamp prefix). */
+  endDate?: string | null;
   /** Round → YYYY-MM-DD for all club championships in this season */
   championshipRoundDueDatesJson: string | null;
+  /** US Squash box league event linked to this booking season (from API). */
+  houseLeagueEventId?: number | null;
 };
 
 function startMondayForSeasonRow(s: Season): string {
@@ -82,9 +86,6 @@ export function App() {
   const [tab, setTab] = useState<Tab>("houseleague");
   const [seasons, setSeasons] = useState<Season[]>([]);
   const [seasonId, setSeasonId] = useState<string>("");
-  const setLog = useCallback((_msg: string) => {
-    /* feedback UI removed */
-  }, []);
 
   const refreshSeasons = useCallback(async () => {
     const s = await api<Season[]>("/api/seasons");
@@ -147,7 +148,11 @@ export function App() {
     seasons.find((x) => x.id === seasonId)?.clubYear ?? null;
 
   const headerSeasonControls =
-    tab === "championships" || tab === "feedback" ? null : seasonSelectControls;
+    tab === "championships" ||
+    tab === "feedback" ||
+    tab === "houseleague"
+      ? null
+      : seasonSelectControls;
 
   const selectedSeason =
     seasons.find((x) => x.id === seasonId) ?? null;
@@ -155,7 +160,9 @@ export function App() {
   return (
     <div
       className={
-        tab === "members" ? "layout layout--fill-viewport" : "layout"
+        tab === "members" || tab === "houseleague"
+          ? "layout layout--fill-viewport"
+          : "layout"
       }
     >
       <nav>
@@ -191,8 +198,14 @@ export function App() {
           </button>
         ) : null}
       </nav>
-      <main className={tab === "members" ? "main--fill-viewport" : undefined}>
-        {tab === "houseleague" ? null : headerSeasonControls != null ? (
+      <main
+        className={
+          tab === "members" || tab === "houseleague"
+            ? "main--fill-viewport"
+            : undefined
+        }
+      >
+        {headerSeasonControls != null ? (
           <div className="row" style={{ marginBottom: "1rem" }}>
             {headerSeasonControls}
           </div>
@@ -203,8 +216,9 @@ export function App() {
             seasonStartMondayISO={
               selectedSeason ? startMondayForSeasonRow(selectedSeason) : ""
             }
-            bookingSeasonControls={seasonSelectorOnly}
-            onLog={setLog}
+            selectedBookingSeason={selectedSeason}
+            onSelectSeason={setSeasonId}
+            onSeasonsRefresh={refreshSeasons}
           />
         )}
         {tab === "championships" && (

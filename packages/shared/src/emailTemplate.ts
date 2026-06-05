@@ -18,7 +18,8 @@ export function normalizeEmailTemplateText(template: string): string {
 
 /**
  * Replace `{{key}}` segments in template with matching values from `vars`.
- * Unknown keys are left unchanged so drafts stay readable until values exist.
+ * Keys present in `vars` (including empty string) are substituted; missing keys are
+ * left unchanged so drafts stay readable until values exist.
  */
 export function interpolateEmailTemplate(
   template: string,
@@ -28,9 +29,10 @@ export function interpolateEmailTemplate(
   return text.replace(
     PLACEHOLDER_RE,
     (full: string, key: string) => {
+      if (!Object.prototype.hasOwnProperty.call(vars, key)) return full;
       const v = vars[key];
-      if (v !== undefined && v !== null && v !== "") return v;
-      return full;
+      if (v === undefined || v === null) return "";
+      return v;
     },
   );
 }

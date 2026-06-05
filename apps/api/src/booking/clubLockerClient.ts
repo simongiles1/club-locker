@@ -265,6 +265,56 @@ function mockBoxLeagueEvents(clubId: number): unknown[] {
 /** Mock-only: persisted box level changes until process restart. */
 const mockBoxLeaguePlayerLevelOverrides = new Map<string, number>();
 
+/** Mock-only: ids removed from the canned roster until process restart. */
+const mockBoxLeagueRemovedPlayerIds = new Map<number, Set<number>>();
+
+/** Mock-only: players appended via POST until process restart. */
+const mockBoxLeagueAddedPlayersByEventId = new Map<number, unknown[]>();
+
+function composeMockBoxLeaguePlayerRows(eventId: number): unknown[] {
+  const removed = mockBoxLeagueRemovedPlayerIds.get(eventId);
+  const base = mockBoxLeaguePlayers(eventId).filter((row) => {
+    const id = (row as { id: number }).id;
+    return !removed?.has(id);
+  });
+  const added = mockBoxLeagueAddedPlayersByEventId.get(eventId) ?? [];
+  return [...base, ...added].map((row) => {
+    const r = row as { id: number };
+    const key = `${eventId}:${r.id}`;
+    const level = mockBoxLeaguePlayerLevelOverrides.get(key);
+    if (level == null) return row;
+    return { ...r, level };
+  });
+}
+
+function mockBoxLeaguePlayerRowTemplate(
+  eventId: number,
+  playerId: number,
+  level: number,
+  firstName: string,
+  lastName: string,
+  rating: number,
+): unknown {
+  return {
+    id: playerId,
+    firstName,
+    lastName,
+    partnerId: null,
+    partnerFirstName: null,
+    partnerLastName: null,
+    level,
+    pointsSeason: 0,
+    winsSeason: 0,
+    lossesSeason: 0,
+    prevBox: level,
+    prevBoxRank: 1,
+    rating,
+    partnerRating: null,
+    playerCurrentRank: 1,
+    _mockEventId: eventId,
+  };
+}
+
 function mockBoxLeaguePlayers(eventId: number): unknown[] {
   const names = [
     ["Alex", "Smith"],
@@ -391,13 +441,7 @@ export function createUssquashClient(config: AppConfig) {
       async listBoxLeaguePlayers(
         eventId: number,
       ): Promise<{ status: number; data: unknown }> {
-        const rows = mockBoxLeaguePlayers(eventId).map((row) => {
-          const r = row as { id: number };
-          const key = `${eventId}:${r.id}`;
-          const level = mockBoxLeaguePlayerLevelOverrides.get(key);
-          if (level == null) return row;
-          return { ...r, level };
-        });
+        const rows = composeMockBoxLeaguePlayerRows(eventId);
         return {
           status: 200,
           data: rows,
@@ -412,6 +456,65 @@ export function createUssquashClient(config: AppConfig) {
           `${eventId}:${playerId}`,
           level,
         );
+        return { status: 200, data: { ok: true, _mock: true } };
+      },
+      async addBoxLeaguePlayer(
+        eventId: number,
+        body: { level: number; id: number; firstName?: string; lastName?: string; rating?: number },
+      ): Promise<{ status: number; data: unknown }> {
+        let removed = mockBoxLeagueRemovedPlayerIds.get(eventId);
+        if (removed?.has(body.id)) {
+          removed.delete(body.id);
+          if (removed.size === 0) mockBoxLeagueRemovedPlayerIds.delete(eventId);
+        }
+        const extras = mockBoxLeagueAddedPlayersByEventId.get(eventId) ?? [];
+        const nextExtras = extras.filter(
+          (row) => (row as { id: number }).id !== body.id,
+        );
+        const fn =
+          typeof body.firstName === "string" && body.firstName.trim()
+            ? body.firstName.trim()
+            : "Player";
+        const ln =
+          typeof body.lastName === "string" && body.lastName.trim()
+            ? body.lastName.trim()
+            : String(body.id);
+        const rating =
+          typeof body.rating === "number" && Number.isFinite(body.rating)
+            ? body.rating
+            : 3;
+        nextExtras.push(
+          mockBoxLeaguePlayerRowTemplate(
+            eventId,
+            body.id,
+            body.level,
+            fn,
+            ln,
+            rating,
+          ),
+        );
+        mockBoxLeagueAddedPlayersByEventId.set(eventId, nextExtras);
+        return { status: 201, data: { ok: true, _mock: true } };
+      },
+      async deleteBoxLeaguePlayer(
+        eventId: number,
+        playerId: number,
+      ): Promise<{ status: number; data: unknown }> {
+        const extras = mockBoxLeagueAddedPlayersByEventId.get(eventId) ?? [];
+        const nextExtras = extras.filter(
+          (row) => (row as { id: number }).id !== playerId,
+        );
+        if (nextExtras.length !== extras.length) {
+          mockBoxLeagueAddedPlayersByEventId.set(eventId, nextExtras);
+        } else {
+          let s = mockBoxLeagueRemovedPlayerIds.get(eventId);
+          if (!s) {
+            s = new Set<number>();
+            mockBoxLeagueRemovedPlayerIds.set(eventId, s);
+          }
+          s.add(playerId);
+        }
+        mockBoxLeaguePlayerLevelOverrides.delete(`${eventId}:${playerId}`);
         return { status: 200, data: { ok: true, _mock: true } };
       },
     };
@@ -536,6 +639,42 @@ export function createUssquashClient(config: AppConfig) {
         method: "PUT",
         headers: liveRequestHeaders(config),
         body: JSON.stringify({ level }),
+      });
+      const data = await readJson(res);
+      return { data, status: res.status };
+    },
+
+    async addBoxLeaguePlayer(
+      eventId: number,
+      body: {
+        level: number;
+        id: number;
+        firstName?: string;
+        lastName?: string;
+        rating?: number;
+      },
+    ): Promise<{ status: number; data: unknown }> {
+      const url = `${base}/box_leagues/${eventId}/players`;
+      // Live API maps the body to spNode_BoxLeagueAddPlayer: use `playerId` (not
+      // `id`) for @playerId. Omit firstName/lastName/rating or the proc gets
+      // too many arguments.
+      const res = await fetch(url, {
+        method: "POST",
+        headers: liveRequestHeaders(config),
+        body: JSON.stringify({ level: body.level, playerId: body.id }),
+      });
+      const data = await readJson(res);
+      return { data, status: res.status };
+    },
+
+    async deleteBoxLeaguePlayer(
+      eventId: number,
+      playerId: number,
+    ): Promise<{ status: number; data: unknown }> {
+      const url = `${base}/box_leagues/${eventId}/players/${playerId}`;
+      const res = await fetch(url, {
+        method: "DELETE",
+        headers: liveRequestHeaders(config),
       });
       const data = await readJson(res);
       return { data, status: res.status };

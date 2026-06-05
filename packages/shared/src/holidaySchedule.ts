@@ -4,10 +4,15 @@ export type StatHolidayHours = {
   closed: boolean;
 };
 
+/** Director-tagged closure type: statutory holiday vs club event (party, tournament, etc.). */
+export type StatHolidayKind = "holiday" | "event";
+
 export type StatHoliday = {
   name: string;
   date: string; // YYYY-MM-DD
   hours: StatHolidayHours;
+  /** Omitted or `"holiday"`: counts toward Monday league shifts. `"event"`: hours only, no Monday shift. */
+  kind?: StatHolidayKind;
 };
 
 function formatISODate(d: Date): string {
@@ -119,7 +124,11 @@ export function isMondayStatHolidayInRegistry(
   registry: readonly StatHoliday[],
 ): boolean {
   const d = parseISODateLocal(isoDate);
-  return d.getDay() === 1 && statHolidayForDateInRegistry(isoDate, registry) != null;
+  if (d.getDay() !== 1) return false;
+  const h = statHolidayForDateInRegistry(isoDate, registry);
+  if (h == null) return false;
+  const kind = h.kind ?? "holiday";
+  return kind === "holiday";
 }
 
 export function seasonWeekPlayDates(

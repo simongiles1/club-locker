@@ -47,8 +47,9 @@ export async function processScheduledOutbox(
     });
     if (sendRes.ok) {
       sent += 1;
+      const ts = new Date().toISOString();
       db.update(emailOutbox)
-        .set({ status: "sent" })
+        .set({ status: "sent", sentAt: ts })
         .where(eq(emailOutbox.id, row.id))
         .run();
     } else {

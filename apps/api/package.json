@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "pnpm --filter @squash/shared build && concurrently -k -n shared,api -c magenta,blue \"pnpm --filter @squash/shared dev\" \"pnpm run dev:server\"",
+    "dev:server": "tsx watch --clear-screen=false --include ../../packages/shared/dist/** src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "db:push": "drizzle-kit push",
@@ -16,6 +17,7 @@
     "@fastify/cors": "^10.0.1",
     "@google/generative-ai": "^0.24.1",
     "@squash/shared": "workspace:*",
+    "archiver": "^8.0.0",
     "better-sqlite3": "^11.6.0",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.38.3",
@@ -27,10 +29,12 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/archiver": "^7.0.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^22.10.2",
     "@types/nodemailer": "^8.0.0",
+    "concurrently": "^9.2.1",
     "drizzle-kit": "^0.30.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

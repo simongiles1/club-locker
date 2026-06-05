@@ -1,7 +1,7 @@
 /**
- * Six-player box weekly rotation per PRD:
- * Week 1: positions 1v2, 3v4;5 & 6 bye. Each subsequent week the ordered list
- * rotates left by one (shift +1), then the same pairing pattern applies.
+ * Six-player box weekly schedule: seven regular-season weeks, two courts per week.
+ * Pairings are fixed (not derived from a positional rotation); the one pairing
+ * omitted across the season is 1 v 6.
  */
 export type WeekMatchup = {
   week: number;
@@ -11,21 +11,55 @@ export type WeekMatchup = {
   byes: [number, number];
 };
 
-export function getRotatedOrder(week: number): number[] {
-  if (week < 1) throw new Error("week must be >= 1");
-  const shift = week - 1;
-  return Array.from({ length: 6 }, (_, i) => ((i + shift) % 6) + 1);
+/** Canonical regular-season matchups and byes (weeks 1–7). */
+export const REGULAR_SEASON_WEEK_MATCHUPS: readonly {
+  matches: readonly [readonly [number, number], readonly [number, number]];
+  byes: readonly [number, number];
+}[] = [
+  { matches: [[1, 2], [3, 4]], byes: [5, 6] },
+  { matches: [[4, 6], [2, 5]], byes: [1, 3] },
+  { matches: [[1, 5], [3, 6]], byes: [2, 4] },
+  { matches: [[1, 4], [2, 6]], byes: [3, 5] },
+  { matches: [[2, 3], [4, 5]], byes: [1, 6] },
+  { matches: [[1, 3], [5, 6]], byes: [2, 4] },
+  { matches: [[3, 5], [2, 4]], byes: [1, 6] },
+];
+
+export const REGULAR_SEASON_WEEKS = REGULAR_SEASON_WEEK_MATCHUPS.length;
+
+export function formatMatchPair(pair: [number, number]): string {
+  const [a, b] = pair;
+  return a < b ? `${a} v ${b}` : `${b} v ${a}`;
+}
+
+export function formatCompactMatchPair(pair: [number, number]): string {
+  const [a, b] = pair;
+  return a < b ? `${a}v${b}` : `${b}v${a}`;
+}
+
+export function formatWeekMatchupsDisplay(week: number): string {
+  const w = getWeekMatchups(week);
+  return w.matches.map((m) => formatMatchPair(m)).join(", ");
+}
+
+export function formatWeekByesDisplay(week: number): string {
+  const w = getWeekMatchups(week);
+  return `${w.byes.join(", ")} BYE`;
 }
 
 export function getWeekMatchups(week: number): WeekMatchup {
-  const order = getRotatedOrder(week);
+  const idx = week - 1;
+  if (idx < 0 || idx >= REGULAR_SEASON_WEEK_MATCHUPS.length) {
+    throw new Error(`week must be 1–${REGULAR_SEASON_WEEK_MATCHUPS.length}`);
+  }
+  const row = REGULAR_SEASON_WEEK_MATCHUPS[idx]!;
   return {
     week,
     matches: [
-      [order[0], order[1]],
-      [order[2], order[3]],
+      [row.matches[0][0], row.matches[0][1]],
+      [row.matches[1][0], row.matches[1][1]],
     ],
-    byes: [order[4], order[5]],
+    byes: [row.byes[0], row.byes[1]],
   };
 }
 

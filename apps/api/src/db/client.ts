@@ -74,6 +74,30 @@ function migrateSqliteSeasonsColumns(sqlite: InstanceType<typeof Database>) {
       "ALTER TABLE seasons ADD COLUMN championship_round_due_dates_json text",
     );
   }
+  ensureColumn(
+    sqlite,
+    "seasons",
+    "draft_house_league_players_json",
+    "draft_house_league_players_json text",
+  );
+  ensureColumn(
+    sqlite,
+    "seasons",
+    "house_league_event_id",
+    "house_league_event_id integer",
+  );
+  ensureColumn(
+    sqlite,
+    "seasons",
+    "season_start_roster_json",
+    "season_start_roster_json text",
+  );
+  ensureColumn(
+    sqlite,
+    "seasons",
+    "season_start_roster_saved_at",
+    "season_start_roster_saved_at text",
+  );
 }
 
 /** Idempotent CREATE TABLE statements for the championships feature. */
@@ -176,6 +200,12 @@ function migrateStatutoryHolidaysTable(sqlite: InstanceType<typeof Database>) {
     CREATE UNIQUE INDEX IF NOT EXISTS statutory_holidays_date_uidx
       ON statutory_holidays(date);
   `);
+  ensureColumn(
+    sqlite,
+    "statutory_holidays",
+    "closure_kind",
+    "closure_kind text NOT NULL DEFAULT 'holiday'",
+  );
 }
 
 function migrateFeedbackTicketsTable(sqlite: InstanceType<typeof Database>) {
@@ -217,6 +247,7 @@ function migrateEmailOutboxAndHouseLeagueReminders(
     "scheduled_send_at",
     "scheduled_send_at text",
   );
+  ensureColumn(sqlite, "email_outbox", "sent_at", "sent_at text");
 
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS house_league_booked_occurrences (
@@ -278,6 +309,14 @@ function migrateAutomationTables(sqlite: InstanceType<typeof Database>) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS inbound_emails_message_id_idx
       ON inbound_emails(message_id);
+  `);
+  ensureColumn(
+    sqlite,
+    "inbound_emails",
+    "mailbox_scope",
+    "mailbox_scope text",
+  );
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS inbound_actions (
       id text PRIMARY KEY,
       email_id text NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
@@ -336,6 +375,45 @@ function migrateAutomationTables(sqlite: InstanceType<typeof Database>) {
   `);
 }
 
+function migrateBoxEmlTemplateAssetsTable(sqlite: InstanceType<typeof Database>) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS box_eml_template_assets (
+      id text PRIMARY KEY,
+      mime_type text NOT NULL,
+      data_base64 text NOT NULL,
+      width integer,
+      height integer,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+}
+
+function migrateHouseLeagueWeeklyBoxSends(sqlite: InstanceType<typeof Database>) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS house_league_weekly_box_sends (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      week_number integer NOT NULL,
+      box_number integer NOT NULL,
+      match_index integer NOT NULL DEFAULT 0,
+      outbox_id text REFERENCES email_outbox(id) ON DELETE SET NULL,
+      sent_at text NOT NULL,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  ensureColumn(
+    sqlite,
+    "house_league_weekly_box_sends",
+    "match_index",
+    "match_index integer NOT NULL DEFAULT 0",
+  );
+  sqlite.exec(`DROP INDEX IF EXISTS hl_weekly_box_send_season_week_box_uidx;`);
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS hl_weekly_box_send_season_week_box_match_uidx
+      ON house_league_weekly_box_sends(season_id, week_number, box_number, match_index);
+  `);
+}
+
 export function createDb(databaseUrl: string) {
   const filePath = path.resolve(resolveSqlitePath(databaseUrl));
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -350,7 +428,19 @@ export function createDb(databaseUrl: string) {
   migrateAutomationTables(sqlite);
   migrateEmailOutboxAndHouseLeagueReminders(sqlite);
   migrateFeedbackTicketsTable(sqlite);
+  migrateBoxEmlTemplateAssetsTable(sqlite);
+  migrateHouseLeagueWeeklyBoxSends(sqlite);
+  migrateSeasonBookingHoldsColumns(sqlite);
   return drizzle(sqlite, { schema });
+}
+
+function migrateSeasonBookingHoldsColumns(sqlite: InstanceType<typeof Database>) {
+  ensureColumn(
+    sqlite,
+    "season_booking_holds",
+    "locally_converted_slots_json",
+    "locally_converted_slots_json text NOT NULL DEFAULT '[]'",
+  );
 }
 
 export type Db = ReturnType<typeof createDb>;

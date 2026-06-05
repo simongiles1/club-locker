@@ -1,3 +1,8 @@
+import {
+  formatWeekByesDisplay,
+  formatWeekMatchupsDisplay,
+  REGULAR_SEASON_BOX_LEVELS,
+} from "@squash/shared";
 import { useState } from "react";
 import { Calendar, Trophy } from "lucide-react";
 
@@ -48,55 +53,16 @@ export type WeekRow = {
 
 /** Public rotation grid (Mondays = boxes 1–8, Tuesdays = 9–16 in the same order). */
 export const leagueSchedule: WeekRow[] = [
-  {
-    weekLabel: "Week 1",
-    isPlayoffs: false,
-    matches: "1 v 2, 3 v 4",
-    byes: "5, 6 BYE",
-    levels: [1, 2, 3, 4, 5, 6, 7, 8],
-  },
-  {
-    weekLabel: "Week 2",
-    isPlayoffs: false,
-    matches: "4 v 6, 5 v 2",
-    byes: "1, 3 BYE",
-    levels: [8, 1, 2, 3, 4, 5, 6, 7],
-  },
-  {
-    weekLabel: "Week 3",
-    isPlayoffs: false,
-    matches: "1 v 5, 3 v 6",
-    byes: "2, 4 BYE",
-    levels: [7, 8, 1, 2, 3, 4, 5, 6],
-  },
-  {
-    weekLabel: "Week 4",
-    isPlayoffs: false,
-    matches: "1 v 4, 2 v 6",
-    byes: "3, 5 BYE",
-    levels: [6, 7, 8, 1, 2, 3, 4, 5],
-  },
-  {
-    weekLabel: "Week 5",
-    isPlayoffs: false,
-    matches: "2 v 3, 4 v 5",
-    byes: "1, 6 BYE",
-    levels: [5, 6, 7, 8, 1, 2, 3, 4],
-  },
-  {
-    weekLabel: "Week 6",
-    isPlayoffs: false,
-    matches: "1 v 3, 5 v 6",
-    byes: "2, 4 BYE",
-    levels: [4, 5, 6, 7, 8, 1, 2, 3],
-  },
-  {
-    weekLabel: "Week 7",
-    isPlayoffs: false,
-    matches: "3 v 5, 2 v 4",
-    byes: "1, 6 BYE",
-    levels: [3, 4, 5, 6, 7, 8, 1, 2],
-  },
+  ...REGULAR_SEASON_BOX_LEVELS.map((levels, idx) => {
+    const weekNum = idx + 1;
+    return {
+      weekLabel: `Week ${weekNum}`,
+      isPlayoffs: false as const,
+      matches: formatWeekMatchupsDisplay(weekNum),
+      byes: formatWeekByesDisplay(weekNum),
+      levels: [...levels],
+    };
+  }),
   {
     weekLabel: "Semi-Finals",
     isPlayoffs: true,

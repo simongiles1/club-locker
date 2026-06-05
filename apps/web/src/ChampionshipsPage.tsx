@@ -593,7 +593,11 @@ export function ChampionshipsPage({
           role="tabpanel"
           aria-labelledby="tab-emails"
         >
-          <EmailsPage onLog={show} templateScope="championships" />
+          <EmailsPage
+            onLog={show}
+            templateScope="championships"
+            linkedSeasonId={seasonId || null}
+          />
         </div>
       ) : null}
 

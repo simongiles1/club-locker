@@ -1,15 +1,20 @@
 import "./load-env.js";
 import cors from "@fastify/cors";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import { and, eq, desc, asc, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   assignManagedCourts,
+  bookingCalendarClubYearSegmentForMondayISO,
+  BOOKING_CALENDAR_SEASONS,
   EMAIL_TEMPLATE_SCOPES,
   getWeekMatchups,
   interpolateEmailTemplate,
+  isBookingCalendarSegmentLocallyActive,
+  isUsSquashBoxLeagueRosterLocallyEditable,
   suggestDraw,
   type PlayerSeed,
+  type BookingCalendarSeason,
   rankBoxStandings,
   playoffSemis,
   topFourForPlayoffs,
@@ -62,7 +67,12 @@ import {
   removeSeasonBookingHold,
   runSeasonBulkBooking,
   runWeeklyConvert,
+  runRebookPlayDay,
+  runStadiumIdMapTestBooking,
+  runBookSlotBothCourtsNoBulkCancel,
   cancelBookingCalendarItems,
+  markWeekBookingDisplayLocal,
+  markSlotBookingDisplayLocal,
 } from "./booking/service.js";
 import {
   createUssquashClient,
@@ -79,13 +89,58 @@ import { createAiAgent } from "./automation/aiAgent.js";
 import { registerAutomationRoutes } from "./automation/routes.js";
 import { ImapAutomationPoller } from "./automation/imapPoller.js";
 import { runSchedulerTick } from "./automation/scheduler.js";
-import { isSettingOn, seedAutomationSettings } from "./automation/settings.js";
+import {
+  isSettingOn,
+  seedAutomationSettings,
+  shouldAutoSendForCurrentMode,
+} from "./automation/settings.js";
 import {
   getHouseLeagueEmailReminderSettings,
   patchHouseLeagueEmailReminderSettings,
   seedHouseLeagueEmailReminderSettings,
 } from "./houseLeague/emailReminderSettings.js";
 import { queueHouseLeagueReminderTestSend } from "./houseLeague/reminderTestSend.js";
+import {
+  buildHouseLeagueBoxEmlBundle,
+  buildHouseLeagueBoxEmlZipBuffer,
+} from "./houseLeague/boxEmlFiles.js";
+import {
+  getHouseLeagueBoxEmlTemplateSettings,
+  patchHouseLeagueBoxEmlTemplateSettings,
+  seedAllHouseLeagueBoxEmlTemplateSettings,
+} from "./houseLeague/boxEmlTemplateSettings.js";
+import {
+  boxEmlAssetPublicUrl,
+  createBoxEmlTemplateAssetFromDataUrl,
+  getBoxEmlTemplateAsset,
+} from "./houseLeague/boxEmlAssets.js";
+import {
+  buildWeeklyBoxEmailBundle,
+  buildWeeklyBoxEmlZipBuffer,
+  resolveWeeklyTargetWeek,
+  stageWeeklyBoxEmails,
+  weeklyEmlFileForItem,
+} from "./houseLeague/weeklyBoxEmail.js";
+import {
+  applyHouseLeagueRosterBookingUpdates,
+  applyHouseLeagueRosterCourtSlot,
+  applyHouseLeagueRosterEmailUpdates,
+  computeHouseLeagueRosterImpact,
+} from "./houseLeague/rosterImpact.js";
+import {
+  computeSeasonStartRosterDiff,
+  parseSeasonStartRosterPlayers,
+  seedSeasonStartRosterFromLive,
+} from "./houseLeague/seasonStartRoster.js";
+import {
+  getHouseLeagueWeeklyBoxEmailSettings,
+  patchHouseLeagueWeeklyBoxEmailSettings,
+  seedHouseLeagueWeeklyBoxEmailSettings,
+} from "./houseLeague/weeklyBoxEmailTemplateSettings.js";
+import {
+  listInboundForArea,
+  listOutboundForArea,
+} from "./emails/listForUi.js";
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL);
@@ -103,6 +158,8 @@ const emailAdapter = createEmailAdapter(config.EMAIL_ADAPTER, {
 const aiAgent = createAiAgent(config);
 seedAutomationSettings(db);
 seedHouseLeagueEmailReminderSettings(db);
+seedAllHouseLeagueBoxEmlTemplateSettings(db);
+seedHouseLeagueWeeklyBoxEmailSettings(db);
 const imapPoller = new ImapAutomationPoller({ db, config, emailAdapter, aiAgent });
 
 const mockLockerRoster: PlayerSeed[] = Array.from({ length: 24 }, (_, i) => ({
@@ -131,10 +188,12 @@ await app.register(cors, { origin: true });
 app.get("/health", async () => ({ ok: true }));
 
 function statutoryHolidayRowToJson(row: typeof statutoryHolidays.$inferSelect) {
+  const kind = row.closureKind === "event" ? "event" : "holiday";
   return {
     id: row.id,
     name: row.name,
     date: row.date,
+    kind,
     hours: {
       open: row.openTime,
       close: row.closeTime,
@@ -152,6 +211,8 @@ app.get("/api/statutory-holidays", async () => {
   return rows.map(statutoryHolidayRowToJson);
 });
 
+const statutoryHolidayClosureKindZ = z.enum(["holiday", "event"]);
+
 const statutoryHolidayPostBody = z
   .object({
     name: z.string().min(1),
@@ -159,6 +220,7 @@ const statutoryHolidayPostBody = z
     open: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
     close: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
     closed: z.boolean(),
+    kind: statutoryHolidayClosureKindZ.optional().default("holiday"),
   })
   .superRefine((b, ctx) => {
     if (!b.closed && (!b.open || !b.close)) {
@@ -179,7 +241,7 @@ app.post("/api/statutory-holidays", async (req, reply) => {
     .get();
   if (clash) {
     return reply.code(409).send({
-      error: "Another statutory holiday is already stored on that date.",
+      error: "Another closure is already stored on that date.",
     });
   }
   const id = crypto.randomUUID();
@@ -191,9 +253,77 @@ app.post("/api/statutory-holidays", async (req, reply) => {
       openTime: body.closed ? null : body.open,
       closeTime: body.closed ? null : body.close,
       closed: body.closed ? 1 : 0,
+      closureKind: body.kind,
     })
     .run();
   const row = db.select().from(statutoryHolidays).where(eq(statutoryHolidays.id, id)).get();
+  return row ? statutoryHolidayRowToJson(row) : null;
+});
+
+const statutoryHolidayPatchBody = z.object({
+  kind: statutoryHolidayClosureKindZ,
+});
+
+app.patch("/api/statutory-holidays/:id", async (req, reply) => {
+  const { id: paramId } = req.params as { id: string };
+  const idParsed = z.string().uuid().safeParse(paramId);
+  if (!idParsed.success) {
+    return reply.code(400).send({ error: "Invalid id" });
+  }
+  const body = statutoryHolidayPatchBody.parse(req.body);
+  const res = db
+    .update(statutoryHolidays)
+    .set({ closureKind: body.kind })
+    .where(eq(statutoryHolidays.id, idParsed.data))
+    .run();
+  if (res.changes === 0) {
+    return reply.code(404).send({ error: "Not found" });
+  }
+  const row = db
+    .select()
+    .from(statutoryHolidays)
+    .where(eq(statutoryHolidays.id, idParsed.data))
+    .get();
+  return row ? statutoryHolidayRowToJson(row) : null;
+});
+
+app.put("/api/statutory-holidays/:id", async (req, reply) => {
+  const { id: paramId } = req.params as { id: string };
+  const idParsed = z.string().uuid().safeParse(paramId);
+  if (!idParsed.success) {
+    return reply.code(400).send({ error: "Invalid id" });
+  }
+  const body = statutoryHolidayPostBody.parse(req.body);
+  const clash = db
+    .select({ id: statutoryHolidays.id })
+    .from(statutoryHolidays)
+    .where(eq(statutoryHolidays.date, body.date))
+    .get();
+  if (clash && clash.id !== idParsed.data) {
+    return reply.code(409).send({
+      error: "Another closure is already stored on that date.",
+    });
+  }
+  const res = db
+    .update(statutoryHolidays)
+    .set({
+      name: body.name.trim(),
+      date: body.date,
+      openTime: body.closed ? null : body.open,
+      closeTime: body.closed ? null : body.close,
+      closed: body.closed ? 1 : 0,
+      closureKind: body.kind,
+    })
+    .where(eq(statutoryHolidays.id, idParsed.data))
+    .run();
+  if (res.changes === 0) {
+    return reply.code(404).send({ error: "Not found" });
+  }
+  const row = db
+    .select()
+    .from(statutoryHolidays)
+    .where(eq(statutoryHolidays.id, idParsed.data))
+    .get();
   return row ? statutoryHolidayRowToJson(row) : null;
 });
 
@@ -500,6 +630,138 @@ app.get("/api/club-members", async (_req, reply) => {
   }
 });
 
+function houseLeagueMutationSeasonIdFromQuery(query: unknown): string | null {
+  if (!query || typeof query !== "object") return null;
+  const raw = (query as Record<string, unknown>).seasonId;
+  if (typeof raw !== "string") return null;
+  const id = z.string().uuid().safeParse(raw);
+  return id.success ? id.data : null;
+}
+
+function bookingSeasonRowAllowsLiveHouseLeagueRosterWrites(
+  row: typeof seasons.$inferSelect,
+): boolean {
+  const seg = row.calendarSegment;
+  const cy = row.clubYear;
+  if (
+    seg == null ||
+    cy == null ||
+    !(BOOKING_CALENDAR_SEASONS as readonly string[]).includes(seg)
+  ) {
+    return false;
+  }
+  return isBookingCalendarSegmentLocallyActive({
+    segment: seg as BookingCalendarSeason,
+    clubYear: cy,
+    explicitSeasonEndDate: row.endDate,
+  });
+}
+
+/**
+ * Resolved from US Squash box league metadata when possible; avoids treating the league read-only
+ * just because booking-segment Mondays differ from the advertised house league calendar.
+ */
+async function usSquashHouseLeagueEventRosterGate(
+  eventNum: number,
+): Promise<"open" | "closed" | "unknown"> {
+  try {
+    const client = createUssquashClient(config);
+    const { status, data } = await client.listBoxLeaguesForClub(
+      config.US_SQUASH_CLUB_ID,
+    );
+    if (status < 200 || status >= 300) return "unknown";
+    const rows = normalizeJsonArray(data);
+    const match = rows.find((raw) => {
+      const r = raw as Record<string, unknown>;
+      const id = Number(r.eventId);
+      return Number.isFinite(id) && id === eventNum;
+    }) as Record<string, unknown> | undefined;
+    const endISO = match?.endDate;
+    if (typeof endISO !== "string" || endISO.trim() === "") return "unknown";
+    const startISO =
+      typeof match?.startDate === "string" ? match.startDate : undefined;
+    return isUsSquashBoxLeagueRosterLocallyEditable({
+      eventEndISO: endISO,
+      eventStartISO: startISO,
+      enforceStart: false,
+    })
+      ? "open"
+      : "closed";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function rosterWritableForBookingSeasonHouseLeagueMutation(
+  row: typeof seasons.$inferSelect,
+  eventNum: number,
+): Promise<boolean> {
+  if (
+    row.houseLeagueEventId != null &&
+    row.houseLeagueEventId !== eventNum
+  ) {
+    return false;
+  }
+  const gate = await usSquashHouseLeagueEventRosterGate(eventNum);
+  if (gate === "open") return true;
+  if (gate === "closed") return false;
+  return bookingSeasonRowAllowsLiveHouseLeagueRosterWrites(row);
+}
+
+/** Returns true when the request should stop (error already sent). */
+async function blockUnlessBookingSeasonAllowsHouseLeagueRosterWrites(
+  reply: FastifyReply,
+  query: unknown,
+  eventNum: number,
+): Promise<boolean> {
+  const seasonIdStr = houseLeagueMutationSeasonIdFromQuery(query);
+  if (!seasonIdStr) {
+    void reply.code(400).send({ error: "season_id_required" });
+    return true;
+  }
+  const row = db.select().from(seasons).where(eq(seasons.id, seasonIdStr)).get();
+  if (!row) {
+    void reply.code(404).send({ error: "season_not_found" });
+    return true;
+  }
+  if (
+    row.houseLeagueEventId != null &&
+    row.houseLeagueEventId !== eventNum
+  ) {
+    void reply.code(400).send({ error: "season_event_mismatch" });
+    return true;
+  }
+  const ok = await rosterWritableForBookingSeasonHouseLeagueMutation(row, eventNum);
+  if (!ok) {
+    void reply.code(403).send({ error: "house_league_roster_not_editable" });
+    return true;
+  }
+  return false;
+}
+
+/** Returns true when the request should stop (error already sent). */
+async function blockUnlessSeasonHouseLeagueRosterWritable(
+  reply: FastifyReply,
+  seasonId: string,
+): Promise<boolean> {
+  const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+  if (!row) {
+    void reply.code(404).send({ error: "season_not_found" });
+    return true;
+  }
+  const eventId = row.houseLeagueEventId;
+  if (eventId == null || eventId <= 0) {
+    void reply.code(400).send({ error: "house_league_event_not_linked" });
+    return true;
+  }
+  const ok = await rosterWritableForBookingSeasonHouseLeagueMutation(row, eventId);
+  if (!ok) {
+    void reply.code(403).send({ error: "house_league_roster_not_editable" });
+    return true;
+  }
+  return false;
+}
+
 app.get("/api/houseleague/events", async (_req, reply) => {
   try {
     const client = createUssquashClient(config);
@@ -555,6 +817,15 @@ app.put("/api/houseleague/events/:eventId/players/:playerId", async (req, reply)
     if (!Number.isFinite(playerNum) || playerNum <= 0) {
       return reply.code(400).send({ error: "invalid_player_id" });
     }
+    if (
+      await blockUnlessBookingSeasonAllowsHouseLeagueRosterWrites(
+        reply,
+        req.query,
+        eventNum,
+      )
+    ) {
+      return;
+    }
     const parsed = houseleagueMoveBody.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -567,6 +838,93 @@ app.put("/api/houseleague/events/:eventId/players/:playerId", async (req, reply)
       eventNum,
       playerNum,
       parsed.data.level,
+    );
+    if (status < 200 || status >= 300) {
+      return reply.code(status).send(data);
+    }
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return reply.code(500).send({ error: message });
+  }
+});
+
+const houseleagueAddRegisteredPlayerBody = z.object({
+  level: z.number().int().min(0),
+  playerId: z.number().int().positive(),
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
+  rating: z.number().finite().optional(),
+});
+
+app.post("/api/houseleague/events/:eventId/players", async (req, reply) => {
+  try {
+    const { eventId } = req.params as { eventId: string };
+    const eventNum = Number(eventId);
+    if (!Number.isFinite(eventNum) || eventNum <= 0) {
+      return reply.code(400).send({ error: "invalid_event_id" });
+    }
+    if (
+      await blockUnlessBookingSeasonAllowsHouseLeagueRosterWrites(
+        reply,
+        req.query,
+        eventNum,
+      )
+    ) {
+      return;
+    }
+    const body = houseleagueAddRegisteredPlayerBody.parse(req.body);
+    const client = createUssquashClient(config);
+    const { status, data } = await client.addBoxLeaguePlayer(eventNum, {
+      level: body.level,
+      id: body.playerId,
+      firstName: body.firstName,
+      lastName: body.lastName,
+      rating: body.rating,
+    });
+    if (status < 200 || status >= 300) {
+      return reply.code(status).send(data);
+    }
+    return { ok: true };
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return reply.code(400).send({
+        error: "invalid_body",
+        detail: err.flatten(),
+      });
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return reply.code(500).send({ error: message });
+  }
+});
+
+app.delete("/api/houseleague/events/:eventId/players/:playerId", async (req, reply) => {
+  try {
+    const { eventId, playerId } = req.params as {
+      eventId: string;
+      playerId: string;
+    };
+    const eventNum = Number(eventId);
+    const playerNum = Number(playerId);
+    if (!Number.isFinite(eventNum) || eventNum <= 0) {
+      return reply.code(400).send({ error: "invalid_event_id" });
+    }
+    if (!Number.isFinite(playerNum) || playerNum <= 0) {
+      return reply.code(400).send({ error: "invalid_player_id" });
+    }
+    if (
+      await blockUnlessBookingSeasonAllowsHouseLeagueRosterWrites(
+        reply,
+        req.query,
+        eventNum,
+      )
+    ) {
+      return;
+    }
+    const client = createUssquashClient(config);
+    const { status, data } = await client.deleteBoxLeaguePlayer(
+      eventNum,
+      playerNum,
     );
     if (status < 200 || status >= 300) {
       return reply.code(status).send(data);
@@ -691,6 +1049,25 @@ app.patch(
   },
 );
 
+const patchHouseLeagueEventBody = z.object({
+  houseLeagueEventId: z.union([z.number().int().positive(), z.null()]),
+});
+
+app.patch(
+  "/api/seasons/:seasonId/house-league-event",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const body = patchHouseLeagueEventBody.parse(req.body ?? {});
+    const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!row) return reply.code(404).send({ error: "season_not_found" });
+    db.update(seasons)
+      .set({ houseLeagueEventId: body.houseLeagueEventId })
+      .where(eq(seasons.id, seasonId))
+      .run();
+    return db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+  },
+);
+
 const seasonBody = z
   .object({
     name: z.string().optional(),
@@ -737,6 +1114,205 @@ app.post("/api/seasons", async (req) => {
     .run();
   return db.select().from(seasons).where(eq(seasons.id, id)).get();
 });
+
+/** Placeholder season creation: clones US Squash box-league registrations into local `draft`. Wire upstream Club Locker/US Squash “copy league” curl here when ready. */
+const createSeasonFromPreviousBody = z.object({
+  sourceSeasonId: z.string(),
+  /** Event whose roster should seed the upcoming season (normally the league you wrap up). */
+  sourceHouseLeagueEventId: z.string(),
+  name: z.string().min(1),
+  startMondayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
+app.post("/api/seasons/create-from-previous", async (req, reply) => {
+  const body = createSeasonFromPreviousBody.parse(req.body ?? {});
+  const src = db
+    .select()
+    .from(seasons)
+    .where(eq(seasons.id, body.sourceSeasonId))
+    .get();
+  if (!src)
+    return reply.code(404).send({ error: "source_season_not_found" });
+
+  const derived =
+    bookingCalendarClubYearSegmentForMondayISO(body.startMondayDate);
+  if (!derived) {
+    return reply.code(400).send({ error: "invalid_start_monday_date" });
+  }
+
+  const eventNum = Number(body.sourceHouseLeagueEventId);
+  if (!Number.isFinite(eventNum) || eventNum <= 0) {
+    return reply.code(400).send({ error: "invalid_source_house_league_event" });
+  }
+
+  let roster: unknown[] = [];
+  let copyWarning: string | undefined;
+
+  try {
+    const client = createUssquashClient(config);
+    const { status, data } = await client.listBoxLeaguePlayers(eventNum);
+    if (status < 200 || status >= 300) {
+      copyWarning = `USSquash roster copy failed (${status}); draft season created empty.`;
+      roster = [];
+    } else {
+      roster = normalizeJsonArray(data).map((row) => ({
+        ...(row as Record<string, unknown>),
+        pointsSeason: 0,
+        winsSeason: 0,
+        lossesSeason: 0,
+      }));
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    copyWarning = `Roster fetch error (${msg}); draft season created empty.`;
+    roster = [];
+  }
+
+  const id = crypto.randomUUID();
+  db.insert(seasons)
+    .values({
+      id,
+      name: body.name,
+      clubYear: derived.clubYear,
+      calendarSegment: derived.segment,
+      startMondayDate: body.startMondayDate,
+      status: "draft",
+      houseLeagueEventId: eventNum,
+      draftHouseLeaguePlayersJson:
+        roster.length > 0 ? JSON.stringify(roster) : undefined,
+    })
+    .run();
+
+  const created = db.select().from(seasons).where(eq(seasons.id, id)).get();
+  if (!created) {
+    return reply.code(500).send({ error: "season_insert_failed" });
+  }
+
+  return reply.send({
+    ok: true,
+    placeholder: true,
+    seasonId: id,
+    message:
+      "This endpoint is provisional. Replace internals with upstream Club Locker / US Squash “copy league to new season” when that integration is ready.",
+    sourceSeasonId: body.sourceSeasonId,
+    sourceHouseLeagueEventId: body.sourceHouseLeagueEventId,
+    rosterCount: roster.length,
+    ...(copyWarning ? { warning: copyWarning } : {}),
+    season: created,
+  });
+});
+
+const draftHouseLeagueRosterPutBody = z.object({
+  players: z.array(z.record(z.unknown())),
+});
+
+app.get(
+  "/api/seasons/:seasonId/draft-house-league-roster",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!row) return reply.code(404).send({ error: "season_not_found" });
+    if (row.status !== "draft") {
+      return reply
+        .code(400)
+        .send({ error: "season_not_a_draft", status: row.status });
+    }
+    const raw = row.draftHouseLeaguePlayersJson;
+    if (!raw) return { players: [] };
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      const players = Array.isArray(parsed) ? parsed : [];
+      return { players };
+    } catch {
+      return { players: [] };
+    }
+  },
+);
+
+app.put(
+  "/api/seasons/:seasonId/draft-house-league-roster",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const body = draftHouseLeagueRosterPutBody.parse(req.body ?? {});
+    const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!row) return reply.code(404).send({ error: "season_not_found" });
+    if (row.status !== "draft") {
+      return reply
+        .code(400)
+        .send({ error: "season_not_a_draft", status: row.status });
+    }
+    db.update(seasons)
+      .set({
+        draftHouseLeaguePlayersJson: JSON.stringify(body.players),
+      })
+      .where(eq(seasons.id, seasonId))
+      .run();
+    return { ok: true };
+  },
+);
+
+const seasonStartRosterPutBody = z.object({
+  players: z.array(z.record(z.unknown())),
+});
+
+app.get(
+  "/api/seasons/:seasonId/season-start-roster",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!row) return reply.code(404).send({ error: "season_not_found" });
+    const players = parseSeasonStartRosterPlayers(row.seasonStartRosterJson);
+    return {
+      players,
+      savedAt: row.seasonStartRosterSavedAt ?? null,
+    };
+  },
+);
+
+app.put(
+  "/api/seasons/:seasonId/season-start-roster",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const body = seasonStartRosterPutBody.parse(req.body ?? {});
+    const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!row) return reply.code(404).send({ error: "season_not_found" });
+    const savedAt = new Date().toISOString();
+    db.update(seasons)
+      .set({
+        seasonStartRosterJson: JSON.stringify(body.players),
+        seasonStartRosterSavedAt: savedAt,
+      })
+      .where(eq(seasons.id, seasonId))
+      .run();
+    return { ok: true, savedAt };
+  },
+);
+
+app.post(
+  "/api/seasons/:seasonId/season-start-roster/seed-from-live",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const client = createUssquashClient(config);
+    const result = await seedSeasonStartRosterFromLive(db, config, seasonId, client);
+    if ("error" in result) {
+      return reply.code(400).send({ error: result.error });
+    }
+    return result;
+  },
+);
+
+app.get(
+  "/api/seasons/:seasonId/season-start-roster/diff",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const client = createUssquashClient(config);
+    const result = await computeSeasonStartRosterDiff(db, config, seasonId, client);
+    if ("error" in result) {
+      return reply.code(400).send({ error: result.error });
+    }
+    return result;
+  },
+);
 
 app.post("/api/seasons/:seasonId/sync", async (req) => {
   const { seasonId } = req.params as { seasonId: string };
@@ -1092,69 +1668,673 @@ app.post("/api/house-league/email-reminders/test-send", async (req, reply) => {
   return { ok: true, id: res.id, scheduledSendAt: res.scheduledSendAt };
 });
 
-/* Email outbox */
-app.get("/api/email-outbox", async () => {
-  return db.select().from(emailOutbox).orderBy(desc(emailOutbox.createdAt)).limit(100).all();
+app.get("/api/seasons/:seasonId/house-league/box-eml", async (req, reply) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const q = z
+    .object({
+      boxNumber: z.coerce.number().int().positive().optional(),
+      purpose: boxEmlTemplatePurposeSchema,
+    })
+    .parse(req.query ?? {});
+  const bundle = await buildHouseLeagueBoxEmlBundle(
+    db,
+    config,
+    seasonId,
+    undefined,
+    undefined,
+    q.purpose,
+  );
+  if ("error" in bundle) {
+    return reply.code(400).send({ error: bundle.error });
+  }
+  if (q.boxNumber != null) {
+    const box = bundle.boxes.find((b) => b.boxNumber === q.boxNumber);
+    if (!box) {
+      return reply.code(404).send({ error: "box_not_found" });
+    }
+    return {
+      seasonName: bundle.seasonName,
+      seasonStartDateLabel: bundle.seasonStartDateLabel,
+      warnings: bundle.warnings,
+      box,
+    };
+  }
+  return bundle;
 });
 
-app.post("/api/seasons/:seasonId/weeks/:week/email-self-managed", async (req) => {
+app.get("/api/seasons/:seasonId/house-league/box-eml.zip", async (req, reply) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const q = z
+    .object({ purpose: boxEmlTemplatePurposeSchema })
+    .parse(req.query ?? {});
+  const result = await buildHouseLeagueBoxEmlZipBuffer(
+    db,
+    config,
+    seasonId,
+    undefined,
+    q.purpose,
+  );
+  if ("error" in result) {
+    return reply.code(400).send({ error: result.error });
+  }
+  return reply
+    .header("Content-Type", "application/zip")
+    .header(
+      "Content-Disposition",
+      `attachment; filename="${result.filename.replace(/"/g, "")}"`,
+    )
+    .send(result.buffer);
+});
+
+const boxEmlTemplatePairBody = z.object({
+  bodyTemplate: z.string().optional(),
+  subjectTemplate: z.string().optional(),
+});
+
+const boxEmlTemplatePurposeSchema = z
+  .enum(["season_start", "box_modification"])
+  .default("season_start");
+
+const BOX_EML_LARGE_BODY_LIMIT = 25 * 1024 * 1024;
+
+app.post(
+  "/api/house-league/box-eml-assets",
+  { bodyLimit: BOX_EML_LARGE_BODY_LIMIT },
+  async (req, reply) => {
+    const body = z
+      .object({
+        dataUrl: z.string().min(1),
+        width: z.number().int().positive().optional(),
+        height: z.number().int().positive().optional(),
+      })
+      .parse(req.body ?? {});
+    try {
+      const asset = createBoxEmlTemplateAssetFromDataUrl(
+        db,
+        body.dataUrl,
+        body.width,
+        body.height,
+      );
+      return { id: asset.id, url: boxEmlAssetPublicUrl(asset.id) };
+    } catch (e) {
+      if (e instanceof Error && e.message === "invalid_image_data_url") {
+        return reply.code(400).send({ error: "invalid_image_data_url" });
+      }
+      throw e;
+    }
+  },
+);
+
+app.get("/api/house-league/box-eml-assets/:id", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const asset = getBoxEmlTemplateAsset(db, id);
+  if (!asset) {
+    return reply.code(404).send({ error: "asset_not_found" });
+  }
+  const buffer = Buffer.from(asset.dataBase64, "base64");
+  return reply
+    .header("Content-Type", asset.mimeType)
+    .header("Cache-Control", "private, max-age=31536000")
+    .send(buffer);
+});
+
+app.post(
+  "/api/seasons/:seasonId/house-league/box-eml.zip",
+  { bodyLimit: BOX_EML_LARGE_BODY_LIMIT },
+  async (req, reply) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      purpose: boxEmlTemplatePurposeSchema,
+      managed: boxEmlTemplatePairBody.optional(),
+      unmanaged: boxEmlTemplatePairBody.optional(),
+      bodyTemplate: z.string().optional(),
+      subjectTemplate: z.string().optional(),
+    })
+    .parse(req.body ?? {});
+  const templateOverride =
+    body.managed || body.unmanaged
+      ? { managed: body.managed, unmanaged: body.unmanaged }
+      : body.bodyTemplate || body.subjectTemplate
+        ? {
+            managed: {
+              bodyTemplate: body.bodyTemplate,
+              subjectTemplate: body.subjectTemplate,
+            },
+            unmanaged: {
+              bodyTemplate: body.bodyTemplate,
+              subjectTemplate: body.subjectTemplate,
+            },
+          }
+        : undefined;
+  const result = await buildHouseLeagueBoxEmlZipBuffer(
+    db,
+    config,
+    seasonId,
+    templateOverride,
+    body.purpose,
+  );
+  if ("error" in result) {
+    return reply.code(400).send({ error: result.error });
+  }
+  return reply
+    .header("Content-Type", "application/zip")
+    .header(
+      "Content-Disposition",
+      `attachment; filename="${result.filename.replace(/"/g, "")}"`,
+    )
+    .send(result.buffer);
+});
+
+app.get("/api/house-league/box-eml-template", async (req) => {
+  const q = z
+    .object({ purpose: boxEmlTemplatePurposeSchema })
+    .parse(req.query ?? {});
+  return getHouseLeagueBoxEmlTemplateSettings(db, q.purpose);
+});
+
+app.patch(
+  "/api/house-league/box-eml-template",
+  { bodyLimit: BOX_EML_LARGE_BODY_LIMIT },
+  async (req, reply) => {
+  const q = z
+    .object({ purpose: boxEmlTemplatePurposeSchema })
+    .parse(req.query ?? {});
+  const body = z
+    .object({
+      managed: boxEmlTemplatePairBody.optional(),
+      unmanaged: boxEmlTemplatePairBody.optional(),
+      bodyTemplate: z.string().optional(),
+      subjectTemplate: z.string().optional(),
+    })
+    .parse(req.body ?? {});
+  const patch =
+    body.managed || body.unmanaged
+      ? { managed: body.managed, unmanaged: body.unmanaged }
+      : body.bodyTemplate !== undefined || body.subjectTemplate !== undefined
+        ? {
+            managed: {
+              bodyTemplate: body.bodyTemplate,
+              subjectTemplate: body.subjectTemplate,
+            },
+          }
+        : {};
+  try {
+    return patchHouseLeagueBoxEmlTemplateSettings(db, patch, q.purpose);
+  } catch (e) {
+    if (e instanceof Error && e.message === "body_template_required") {
+      return reply.code(400).send({ error: "body_template_required" });
+    }
+    if (e instanceof Error && e.message === "subject_template_required") {
+      return reply.code(400).send({ error: "subject_template_required" });
+    }
+    throw e;
+  }
+});
+
+/* Email outbox */
+app.get("/api/email-outbox", async (req) => {
+  const q = z
+    .object({
+      limit: z.coerce.number().int().min(1).max(500).optional(),
+      area: z.enum(["house_league", "championships"]).optional(),
+      seasonId: z.string().optional(),
+    })
+    .parse(req.query ?? {});
+  const limit = q.limit ?? 100;
+  if (!q.area) {
+    return db
+      .select()
+      .from(emailOutbox)
+      .orderBy(desc(emailOutbox.createdAt))
+      .limit(limit)
+      .all();
+  }
+  return listOutboundForArea(db, q.area, {
+    seasonId: q.seasonId,
+    limit,
+  });
+});
+
+app.get("/api/email-inbox", async (req) => {
+  const q = z
+    .object({
+      limit: z.coerce.number().int().min(1).max(500).optional(),
+      area: z.enum(["house_league", "championships"]),
+    })
+    .parse(req.query ?? {});
+  return listInboundForArea(db, q.area, { limit: q.limit ?? 100 });
+});
+
+/** @deprecated Use POST .../house-league/weekly-box-email/send */
+app.post("/api/seasons/:seasonId/weeks/:week/email-self-managed", async (req, reply) => {
   const { seasonId, week } = req.params as { seasonId: string; week: string };
   const w = Number(week);
-  const plan = db
-    .select()
-    .from(weekPlans)
-    .where(eq(weekPlans.seasonId, seasonId))
-    .all()
-    .filter((p) => p.weekNumber === w)
-    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
-  if (!plan) return { error: "week_plan_missing" };
-  const payload = JSON.parse(plan.payloadJson) as {
-    boxes: {
-      boxNumber: number;
-      managed: boolean;
-      matchups: [string, string][];
-    }[];
-  };
-  const created: string[] = [];
-  const allPlayers = db.select().from(players).all();
-  const nameOf = (id: string) => allPlayers.find((p) => p.id === id)?.displayName ?? id;
-  for (const b of payload.boxes) {
-    if (b.managed) continue;
-    const boxRow = db
-      .select()
-      .from(leagueBoxes)
-      .where(
-        and(eq(leagueBoxes.seasonId, seasonId), eq(leagueBoxes.boxNumber, b.boxNumber)),
-      )
-      .get();
-    if (!boxRow) continue;
-    const seatRows = db
-      .select()
-      .from(leagueBoxPlayers)
-      .where(eq(leagueBoxPlayers.boxId, boxRow.id))
-      .all();
-    const ids = seatRows.map((r) => r.playerId);
-    const addrs = allPlayers.filter((p) => ids.includes(p.id) && p.email);
-    const to = addrs.map((p) => p.email).filter(Boolean).join(", ");
-    const subject = `House league week ${w} — Box ${b.boxNumber} matchups`;
-    const bodyText = `Your matchups this week:\n${b.matchups.map((m) => `- ${nameOf(m[0])} vs ${nameOf(m[1])}`).join("\n")}\nPlease arrange time and book a court in Club Locker.`;
-    const eid = crypto.randomUUID();
-    db.insert(emailOutbox)
-      .values({
-        id: eid,
-        kind: "weekly_box",
-        seasonId,
-        status: "draft",
-        toAddress: to || "unknown@example.test",
-        subject,
-        body: bodyText,
-        metaJson: JSON.stringify({ boxNumber: b.boxNumber, week: w }),
-      })
-      .run();
-    created.push(eid);
+  if (!Number.isFinite(w) || w < 1) {
+    return reply.code(400).send({ error: "invalid_week" });
   }
-  return { created };
+  const body = z
+    .object({
+      force: z.boolean().optional(),
+      dryRun: z.boolean().optional(),
+      boxNumber: z.number().int().positive().optional(),
+    })
+    .parse(req.body ?? {});
+  const autoSend = shouldAutoSendForCurrentMode(db);
+  const out = await stageWeeklyBoxEmails(db, config, emailAdapter, {
+    seasonId,
+    weekNumber: w,
+    autoSend,
+    mode: "normal",
+    force: body.force,
+    dryRun: body.dryRun,
+    boxNumbers: body.boxNumber != null ? [body.boxNumber] : undefined,
+  });
+  return {
+    ok: true,
+    weekNumber: w,
+    staged: out.staged,
+    sent: out.sent,
+    skipped: out.skipped,
+    warnings: out.warnings,
+  };
 });
+
+const weeklyTemplatePairPatch = z.object({
+  bodyTemplate: z.string().optional(),
+  subjectTemplate: z.string().optional(),
+});
+
+const patchWeeklyBoxEmailSettingsBody = z.object({
+  enabled: z.boolean().optional(),
+  seasonId: z.string().nullable().optional(),
+  recipientMode: z.enum(["per_box", "per_matchup"]).optional(),
+  fromEmail: z.string().min(1).email().optional(),
+  fromName: z.string().optional(),
+  alternateFromEmails: z.array(z.string().email()).optional(),
+  /** @deprecated Use alternateFromEmails */
+  extraToEmails: z.array(z.string().email()).optional(),
+  templates: z
+    .object({
+      perBox: z
+        .object({
+          managed: weeklyTemplatePairPatch.optional(),
+          unmanaged: weeklyTemplatePairPatch.optional(),
+        })
+        .optional(),
+      perMatchup: z
+        .object({
+          managed: weeklyTemplatePairPatch.optional(),
+          unmanaged: weeklyTemplatePairPatch.optional(),
+        })
+        .optional(),
+      managed: weeklyTemplatePairPatch.optional(),
+      unmanaged: weeklyTemplatePairPatch.optional(),
+    })
+    .optional(),
+});
+
+app.get("/api/house-league/weekly-box-email-settings", async () =>
+  getHouseLeagueWeeklyBoxEmailSettings(db, config),
+);
+
+app.patch("/api/house-league/weekly-box-email-settings", async (req, reply) => {
+  const body = patchWeeklyBoxEmailSettingsBody.parse(req.body ?? {});
+  try {
+    return patchHouseLeagueWeeklyBoxEmailSettings(db, config, body);
+  } catch (e) {
+    if (e instanceof Error && e.message === "body_template_required") {
+      return reply.code(400).send({ error: "body_template_required" });
+    }
+    if (e instanceof Error && e.message === "subject_template_required") {
+      return reply.code(400).send({ error: "subject_template_required" });
+    }
+    throw e;
+  }
+});
+
+app.get("/api/seasons/:seasonId/house-league/roster-impact", async (req, reply) => {
+  const { seasonId } = req.params as { seasonId: string };
+  if (await blockUnlessSeasonHouseLeagueRosterWritable(reply, seasonId)) {
+    return;
+  }
+  const q = z
+    .object({
+      weekFilter: z
+        .enum(["current_and_future", "all_converted"])
+        .optional(),
+      weeks: z.string().optional(),
+      asOfDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional(),
+    })
+    .parse(req.query ?? {});
+  let weekFilter:
+    | "current_and_future"
+    | "all_converted"
+    | { weekNumbers: number[] } = q.weekFilter ?? "current_and_future";
+  if (q.weeks?.trim()) {
+    const nums = q.weeks
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n >= 1);
+    if (nums.length > 0) weekFilter = { weekNumbers: nums };
+  }
+  const result = await computeHouseLeagueRosterImpact(db, config, seasonId, {
+    weekFilter,
+    asOfDate: q.asOfDate,
+  });
+  if ("error" in result) {
+    return reply.code(400).send({ error: result.error });
+  }
+  return result;
+});
+
+app.post(
+  "/api/seasons/:seasonId/house-league/roster-impact/apply-bookings",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    if (await blockUnlessSeasonHouseLeagueRosterWritable(reply, seasonId)) {
+      return;
+    }
+    const body = z
+      .object({
+        weekNumbers: z.array(z.number().int().positive()).min(1),
+        confirm: z.literal(true),
+        notifyOnDelete: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+      })
+      .parse(req.body ?? {});
+    const out = await applyHouseLeagueRosterBookingUpdates(db, config, {
+      seasonId,
+      weekNumbers: body.weekNumbers,
+      confirm: body.confirm,
+      notifyOnDelete: body.notifyOnDelete,
+      dryRun: body.dryRun,
+    });
+    return out;
+  },
+);
+
+app.post(
+  "/api/seasons/:seasonId/house-league/roster-impact/apply-court-slot",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    if (await blockUnlessSeasonHouseLeagueRosterWritable(reply, seasonId)) {
+      return;
+    }
+    const body = z
+      .object({
+        weekNumber: z.number().int().positive(),
+        playDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        slot: z.string().min(1),
+        courtId: z.number().int().positive(),
+        boxNumber: z.number().int().positive(),
+        confirm: z.literal(true),
+        notifyOnDelete: z.boolean().optional(),
+      })
+      .parse(req.body ?? {});
+    const out = await applyHouseLeagueRosterCourtSlot(db, config, {
+      seasonId,
+      weekNumber: body.weekNumber,
+      playDate: body.playDate,
+      slot: body.slot,
+      courtId: body.courtId,
+      boxNumber: body.boxNumber,
+      confirm: body.confirm,
+      notifyOnDelete: body.notifyOnDelete,
+    });
+    return out;
+  },
+);
+
+app.post(
+  "/api/seasons/:seasonId/house-league/roster-impact/apply-emails",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    if (await blockUnlessSeasonHouseLeagueRosterWritable(reply, seasonId)) {
+      return;
+    }
+    const body = z
+      .object({
+        weekly: z
+          .array(
+            z.object({
+              weekNumber: z.number().int().positive(),
+              boxNumbers: z.array(z.number().int().positive()).optional(),
+            }),
+          )
+          .min(1),
+        confirm: z.literal(true),
+        dryRun: z.boolean().optional(),
+      })
+      .parse(req.body ?? {});
+    const autoSend = shouldAutoSendForCurrentMode(db);
+    const out = await applyHouseLeagueRosterEmailUpdates(
+      db,
+      config,
+      emailAdapter,
+      {
+        seasonId,
+        weekly: body.weekly,
+        confirm: body.confirm,
+        dryRun: body.dryRun,
+      },
+      autoSend,
+    );
+    return out;
+  },
+);
+
+app.get("/api/seasons/:seasonId/house-league/weekly-box-email", async (req, reply) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const q = z
+    .object({
+      week: z.coerce.number().int().positive().optional(),
+    })
+    .parse(req.query ?? {});
+  const season = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+  if (!season) return reply.code(404).send({ error: "season_not_found" });
+  const startMonday = season.startMondayDate?.trim() ?? "";
+  let weekNumber = q.week;
+  if (weekNumber == null) {
+    if (!startMonday) {
+      return reply.code(400).send({ error: "season_start_monday_required" });
+    }
+    const target = resolveWeeklyTargetWeek(db, startMonday);
+    if (!target) {
+      return reply.code(400).send({ error: "no_target_week" });
+    }
+    weekNumber = target.weekNumber;
+  }
+  const bundle = await buildWeeklyBoxEmailBundle(db, config, seasonId, weekNumber);
+  if ("error" in bundle) {
+    return reply.code(400).send({ error: bundle.error });
+  }
+  return bundle;
+});
+
+function resolveWeeklyZipWeekNumber(
+  seasonId: string,
+  week: number | undefined,
+): number | { error: string; status: number } {
+  if (week != null) return week;
+  const season = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+  if (!season) return { error: "season_not_found", status: 404 };
+  const startMonday = season.startMondayDate?.trim() ?? "";
+  if (!startMonday) {
+    return { error: "season_start_monday_required", status: 400 };
+  }
+  const target = resolveWeeklyTargetWeek(db, startMonday);
+  if (!target) {
+    return { error: "no_target_week", status: 400 };
+  }
+  return target.weekNumber;
+}
+
+app.get(
+  "/api/seasons/:seasonId/house-league/weekly-box-email.zip",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const q = z
+      .object({
+        week: z.coerce.number().int().positive().optional(),
+        fromEmail: z.string().min(1).email().optional(),
+        fromName: z.string().optional(),
+      })
+      .parse(req.query ?? {});
+    const season = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!season) return reply.code(404).send({ error: "season_not_found" });
+    const weekResolved = resolveWeeklyZipWeekNumber(seasonId, q.week);
+    if (typeof weekResolved !== "number") {
+      return reply.code(weekResolved.status).send({ error: weekResolved.error });
+    }
+    const delivery = getHouseLeagueWeeklyBoxEmailSettings(db, config);
+    const result = await buildWeeklyBoxEmlZipBuffer(
+      db,
+      config,
+      seasonId,
+      weekResolved,
+      {
+        fromEmail: q.fromEmail?.trim() || delivery.fromEmail,
+        fromName: q.fromName !== undefined ? q.fromName : delivery.fromName,
+      },
+    );
+    if ("error" in result) {
+      return reply.code(400).send({ error: result.error });
+    }
+    return reply
+      .header("Content-Type", "application/zip")
+      .header(
+        "Content-Disposition",
+        `attachment; filename="${result.filename.replace(/"/g, "")}"`,
+      )
+      .send(result.buffer);
+  },
+);
+
+app.post(
+  "/api/seasons/:seasonId/house-league/weekly-box-email.zip",
+  { bodyLimit: BOX_EML_LARGE_BODY_LIMIT },
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const body = z
+      .object({
+        week: z.number().int().positive(),
+        fromEmail: z.string().min(1).email().optional(),
+        fromName: z.string().optional(),
+        templates: patchWeeklyBoxEmailSettingsBody.shape.templates,
+      })
+      .parse(req.body ?? {});
+    const season = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!season) return reply.code(404).send({ error: "season_not_found" });
+    const delivery = getHouseLeagueWeeklyBoxEmailSettings(db, config);
+    const result = await buildWeeklyBoxEmlZipBuffer(db, config, seasonId, body.week, {
+      templateOverride: body.templates,
+      fromEmail: body.fromEmail?.trim() || delivery.fromEmail,
+      fromName: body.fromName !== undefined ? body.fromName : delivery.fromName,
+    });
+    if ("error" in result) {
+      return reply.code(400).send({ error: result.error });
+    }
+    return reply
+      .header("Content-Type", "application/zip")
+      .header(
+        "Content-Disposition",
+        `attachment; filename="${result.filename.replace(/"/g, "")}"`,
+      )
+      .send(result.buffer);
+  },
+);
+
+app.get(
+  "/api/seasons/:seasonId/house-league/weekly-box-email/box-eml",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const q = z
+      .object({
+        week: z.coerce.number().int().positive(),
+        boxNumber: z.coerce.number().int().positive(),
+        matchIndex: z.coerce.number().int().min(0).max(2).optional(),
+        itemKey: z.string().min(1).optional(),
+        fromEmail: z.string().min(1).email().optional(),
+        fromName: z.string().optional(),
+      })
+      .parse(req.query ?? {});
+    const delivery = getHouseLeagueWeeklyBoxEmailSettings(db, config);
+    const bundle = await buildWeeklyBoxEmailBundle(
+      db,
+      config,
+      seasonId,
+      q.week,
+    );
+    if ("error" in bundle) {
+      return reply.code(400).send({ error: bundle.error });
+    }
+    const item =
+      (q.itemKey
+        ? bundle.items.find((i) => i.itemKey === q.itemKey)
+        : null) ??
+      bundle.items.find(
+        (i) =>
+          i.boxNumber === q.boxNumber &&
+          i.matchIndex === (q.matchIndex ?? 0),
+      );
+    if (!item) {
+      return reply.code(404).send({ error: "item_not_found" });
+    }
+    const eml = weeklyEmlFileForItem(
+      item,
+      q.week,
+      q.fromName?.trim() || delivery.fromName,
+      q.fromEmail?.trim() || delivery.fromEmail,
+    );
+    if ("error" in eml) {
+      return reply.code(400).send({ error: eml.error });
+    }
+    return reply
+      .header("Content-Type", "message/rfc822")
+      .header(
+        "Content-Disposition",
+        `attachment; filename="${eml.filename.replace(/"/g, "")}"`,
+      )
+      .send(eml.content);
+  },
+);
+
+app.post(
+  "/api/seasons/:seasonId/house-league/weekly-box-email/send",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const body = z
+      .object({
+        week: z.number().int().positive(),
+        force: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        boxNumber: z.number().int().positive().optional(),
+      })
+      .parse(req.body ?? {});
+    const autoSend = shouldAutoSendForCurrentMode(db);
+    const out = await stageWeeklyBoxEmails(db, config, emailAdapter, {
+      seasonId,
+      weekNumber: body.week,
+      autoSend,
+      mode: "normal",
+      force: body.force,
+      dryRun: body.dryRun,
+      boxNumbers: body.boxNumber != null ? [body.boxNumber] : undefined,
+    });
+    return {
+      ok: true,
+      weekNumber: body.week,
+      staged: out.staged,
+      sent: out.sent,
+      skipped: out.skipped,
+      warnings: out.warnings,
+    };
+  },
+);
 
 app.post("/api/email-outbox/:id/approve", async (req) => {
   const { id } = req.params as { id: string };
@@ -1176,7 +2356,10 @@ app.post("/api/email-outbox/:id/send", async (req) => {
   if (!res.ok) {
     return { ok: false, error: res.error };
   }
-  db.update(emailOutbox).set({ status: "sent" }).where(eq(emailOutbox.id, id)).run();
+  db.update(emailOutbox)
+    .set({ status: "sent", sentAt: new Date().toISOString() })
+    .where(eq(emailOutbox.id, id))
+    .run();
   return { ok: true };
 });
 
@@ -1245,6 +2428,95 @@ app.post("/api/emails/test-send", async (req, reply) => {
   }
 
   return { ok: true, sent: rows.length };
+});
+
+function csvEscapeCell(value: string): string {
+  const v = String(value ?? "").replace(/\r\n|\n|\r/g, " ").trimEnd();
+  if (/["\n,]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
+}
+
+function houseLeagueRosterCsvBuffer(
+  roster: { firstName: string; lastName: string }[],
+): Buffer {
+  const lines = [
+    `${csvEscapeCell("First name")},${csvEscapeCell("Last name")}`,
+  ];
+  for (const r of roster) {
+    lines.push(`${csvEscapeCell(r.firstName)},${csvEscapeCell(r.lastName)}`);
+  }
+  return Buffer.from(`\uFEFF${lines.join("\r\n")}`, "utf8");
+}
+
+const houseLeagueAccountingRosterMailBody = z.object({
+  to: z.string().email(),
+  body: z.string().min(1).max(100_000),
+  /** Booking season row id (shown in HL Emails → Outbox when filtering by linked season). */
+  seasonId: z.string().min(1).optional(),
+  roster: z
+    .array(
+      z.object({
+        firstName: z.string().max(200),
+        lastName: z.string().max(200),
+      }),
+    )
+    .min(1)
+    .max(5000),
+});
+
+/**
+ * Director action: email the current house league roster CSV (first / last name only)
+ * to an accounting address.
+ */
+app.post("/api/houseleague/roster/send-accounting", async (req, reply) => {
+  const body = houseLeagueAccountingRosterMailBody.parse(req.body);
+  const csvBuf = houseLeagueRosterCsvBuffer(body.roster);
+  const day = new Date().toISOString().slice(0, 10);
+  const filename = `house-league-roster-${day}.csv`;
+  const subject = `House league roster (${body.roster.length} players)`;
+
+  const sent = await emailAdapter.send({
+    to: body.to.trim(),
+    subject,
+    body: body.body.trim(),
+    meta: {
+      kind: "houseleague_roster_accounting",
+      playerCount: body.roster.length,
+    },
+    attachments: [
+      {
+        filename,
+        content: csvBuf,
+        contentType: "text/csv; charset=utf-8",
+      },
+    ],
+  });
+
+  if (!sent.ok) {
+    return reply.code(502).send({ ok: false, error: sent.error });
+  }
+
+  const sid = body.seasonId?.trim();
+  const ts = new Date().toISOString();
+  db.insert(emailOutbox)
+    .values({
+      id: crypto.randomUUID(),
+      kind: "houseleague_roster_accounting",
+      seasonId: sid || null,
+      status: "sent",
+      scheduledSendAt: null,
+      sentAt: ts,
+      toAddress: body.to.trim(),
+      subject,
+      body: body.body.trim(),
+      metaJson: JSON.stringify({
+        rosterAccountingAttachment: filename,
+        playerCount: body.roster.length,
+      }),
+    })
+    .run();
+
+  return { ok: true };
 });
 
 /* Playoffs */
@@ -1355,6 +2627,115 @@ app.post("/api/seasons/:seasonId/booking/convert", async (req) => {
     })
     .parse(req.body);
   return runWeeklyConvert(db, config, { seasonId, ...body });
+});
+
+app.post("/api/seasons/:seasonId/booking/rebook-play-day", async (req) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      week: z.coerce.number().int().min(1),
+      playDay: z.enum(["mon", "tue"]),
+      holdId: z.string().optional(),
+      startMondayDate: z.string().optional(),
+      confirm: z.boolean(),
+    })
+    .parse(req.body);
+  return runRebookPlayDay(db, config, { seasonId, ...body });
+});
+
+app.post("/api/seasons/:seasonId/booking/mark-week-local", async (req) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      startMondayDate: z.string().min(1),
+      week: z.coerce.number().int().min(1),
+      display: z.enum(["bulk_held", "converted"]),
+    })
+    .parse(req.body);
+  return markWeekBookingDisplayLocal(db, { seasonId, ...body });
+});
+
+app.post("/api/seasons/:seasonId/booking/mark-slot-local", async (req) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      startMondayDate: z.string().min(1),
+      week: z.coerce.number().int().min(1),
+      date: z.string().min(1),
+      begin: z.string().min(1),
+      end: z.string().min(1),
+      display: z.enum(["bulk_held", "converted"]),
+    })
+    .parse(req.body);
+  return markSlotBookingDisplayLocal(db, { seasonId, ...body });
+});
+
+app.post(
+  "/api/seasons/:seasonId/booking/book-slot-both-courts",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const body = z
+      .object({
+        week: z.coerce.number().int().min(1),
+        mondayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        tuesdayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        begin: z.string().regex(/^\d{1,2}:\d{2}$/),
+        end: z.string().regex(/^\d{1,2}:\d{2}$/),
+      })
+      .safeParse(req.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({
+        ok: false,
+        message: "Invalid request",
+        detail: body.error.flatten(),
+      });
+    }
+    try {
+      const result = await runBookSlotBothCourtsNoBulkCancel(db, config, {
+        seasonId,
+        ...body.data,
+      });
+      const code = result.ok ? 200 : 502;
+      return reply.code(code).send(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(500).send({ ok: false, message, courts: [] });
+    }
+  },
+);
+
+/** TEMP: Stadium ID-map smoke test before Convert Visible Week. */
+app.post("/api/seasons/:seasonId/booking/test-stadium-id-map", async (req, reply) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      week: z.coerce.number().int().min(1),
+      mondayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      tuesdayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      sourceBegin: z.string().regex(/^\d{1,2}:\d{2}$/),
+      sourceEnd: z.string().regex(/^\d{1,2}:\d{2}$/),
+    })
+    .safeParse(req.body ?? {});
+  if (!body.success) {
+    return reply.code(400).send({
+      ok: false,
+      message: "Invalid request",
+      detail: body.error.flatten(),
+    });
+  }
+  try {
+    const result = await runStadiumIdMapTestBooking(db, config, {
+      seasonId,
+      ...body.data,
+    });
+    const code = result.ok ? 200 : 502;
+    return reply.code(code).send(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return reply.code(500).send({ ok: false, message });
+  }
 });
 
 app.get(

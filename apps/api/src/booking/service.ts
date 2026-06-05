@@ -21,6 +21,14 @@ import {
 } from "./clubLockerClient.js";
 import { buildManagedMatchReservations, type WeekPlanPayload } from "./payloads.js";
 import {
+  buildLiveWeekPlan,
+  livePlayerDisplayName,
+  liveWeekPlanResolvable,
+  normalizeLiveBoxLeaguePlayers,
+  type LiveBoxLeaguePlayer,
+  type LiveManagedReservationItem,
+} from "./liveWeekPlan.js";
+import {
   BULK_MONDAY_TIME_WINDOWS,
   BULK_TUESDAY_TIME_WINDOWS,
   bulkHoldSlotsForWeekday,
@@ -30,13 +38,41 @@ import {
 import {
   allBulkSlotCourts,
   allBulkSlotsForSingleDay,
+  formatReservationSlot,
 } from "./slotMap.js";
+import { runSingleCourtMatchBooking } from "./singleCourtMatch.js";
+import { loadSeasonStartGroundTruthPlayers } from "../houseLeague/seasonStartRoster.js";
 
 type PlayerRow = InferSelectModel<typeof players>;
+
+/** Season-start roster snapshot for schedule seat → player (when saved). */
+function optionalSeasonStartGroundTruth(
+  db: Db,
+  seasonId: string,
+): LiveBoxLeaguePlayer[] | undefined {
+  const gt = loadSeasonStartGroundTruthPlayers(
+    db,
+    seasonId,
+  ) as LiveBoxLeaguePlayer[];
+  return gt.length > 0 ? gt : undefined;
+}
 type SeasonHoldRow = InferSelectModel<typeof seasonBookingHolds>;
 type WeekHoldRow = InferSelectModel<typeof bookingHolds>;
 
 const SLOTS_PER_PLAY_DAY = 8 * 2; // slot labels × two courts (matches allBulkSlotsForSingleDay)
+
+/** Base delay between sequential Club Locker match POSTs during weekly convert. */
+const MATCH_BOOKING_PACE_BASE_MS = 3000;
+/** Random extra delay (0–1s) on top of base so pacing is not perfectly periodic. */
+const MATCH_BOOKING_PACE_JITTER_MS = 1000;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function paceBetweenMatchBookingsMs(): number {
+  return MATCH_BOOKING_PACE_BASE_MS + Math.random() * MATCH_BOOKING_PACE_JITTER_MS;
+}
 
 /**
  * Canonical play week number for semi-finals (seven regular-season weeks precede).
@@ -58,6 +94,7 @@ function statHolidayRegistryFromDb(db: Db): StatHoliday[] {
       close: r.closeTime,
       closed: r.closed === 1,
     },
+    kind: r.closureKind === "event" ? "event" : "holiday",
   }));
 }
 
@@ -187,7 +224,7 @@ function seasonPrefixForBulkClinicName(
 }
 
 /** First Monday in `week` (1 = week of start Monday = startMonday) */
-function seasonPlayDates(
+export function seasonPlayDates(
   db: Db,
   startMonday: string,
   weekNumber: number,
@@ -299,7 +336,78 @@ function playersMap(db: Db): Map<string, PlayerRow> {
   return new Map(db.select().from(players).all().map((p) => [p.id, p]));
 }
 
-export function previewBooking(
+export async function fetchLiveBoxLeagueRosterForSeason(
+  db: Db,
+  _config: AppConfig,
+  seasonId: string,
+  client: UssquashClient,
+): Promise<{ roster: LiveBoxLeaguePlayer[] } | { error: string }> {
+  const season = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+  if (!season) return { error: "season_not_found" };
+  const eventId = season.houseLeagueEventId;
+  if (eventId == null || eventId <= 0) {
+    return {
+      error:
+        "Link a US Squash house league event to this booking season (House League Setup), then try again.",
+    };
+  }
+  const { status, data } = await client.listBoxLeaguePlayers(eventId);
+  if (status < 200 || status >= 300) {
+    return { error: `US Squash roster request failed (HTTP ${status}).` };
+  }
+  const roster = normalizeLiveBoxLeaguePlayers(data);
+  if (roster.length === 0) {
+    return { error: "US Squash box league roster is empty." };
+  }
+  return { roster };
+}
+
+export function ensurePlayerRowFromUssquash(
+  db: Db,
+  ussquashId: number,
+  displayName: string,
+  rating: number,
+): string {
+  const externalId = String(ussquashId);
+  const existing = db
+    .select()
+    .from(players)
+    .where(eq(players.externalId, externalId))
+    .get();
+  if (existing) return existing.id;
+  const id = crypto.randomUUID();
+  db.insert(players)
+    .values({
+      id,
+      externalId,
+      displayName,
+      email: null,
+      rating: String(Number.isFinite(rating) ? rating : 3),
+    })
+    .run();
+  return id;
+}
+
+function persistWeekPlanAuditRow(
+  db: Db,
+  seasonId: string,
+  week: number,
+  payload: WeekPlanPayload,
+): string {
+  const id = crypto.randomUUID();
+  db.insert(weekPlans)
+    .values({
+      id,
+      seasonId,
+      weekNumber: week,
+      payloadJson: JSON.stringify(payload),
+      status: "converted",
+    })
+    .run();
+  return id;
+}
+
+function previewBookingFromStoredWeekPlan(
   db: Db,
   config: AppConfig,
   seasonId: string,
@@ -345,6 +453,112 @@ export function previewBooking(
     })),
     missingExternal,
   };
+}
+
+function auditPayloadWithLocalPlayerIds(
+  db: Db,
+  payload: WeekPlanPayload,
+  roster: readonly LiveBoxLeaguePlayer[],
+): WeekPlanPayload {
+  const byRef = new Map<string, LiveBoxLeaguePlayer>(
+    roster.map((p) => [`ussquash:${p.id}`, p]),
+  );
+  const resolveRef = (ref: string | undefined): string | undefined => {
+    if (!ref) return ref;
+    if (!ref.startsWith("ussquash:")) return ref;
+    const p = byRef.get(ref);
+    if (!p) return ref;
+    return ensurePlayerRowFromUssquash(
+      db,
+      p.id,
+      livePlayerDisplayName(p),
+      p.rating,
+    );
+  };
+  return {
+    week: payload.week,
+    boxes: payload.boxes.map((b) => ({
+      ...b,
+      matchups: b.matchups.map(
+        ([a, b2]) => [resolveRef(a), resolveRef(b2)] as [string | undefined, string | undefined],
+      ),
+    })),
+  };
+}
+
+export async function previewBooking(
+  db: Db,
+  config: AppConfig,
+  seasonId: string,
+  week: number,
+  mondayDate: string,
+  tuesdayDate: string,
+  client: UssquashClient = createUssquashClient(config),
+): Promise<
+  | {
+      weekPlanId: string;
+      bulkSlotCount: number;
+      managedMatchCount: number;
+      items: { box: number; date: string; courtId: string; slot: string; players: string[] }[];
+      missingExternal: { playerId: string; displayName: string; box: number }[];
+    }
+  | { error: string }
+> {
+  const court1 = config.US_SQUASH_COURT_1_ID;
+  const court2 = config.US_SQUASH_COURT_2_ID;
+  const rosterResult = await fetchLiveBoxLeagueRosterForSeason(
+    db,
+    config,
+    seasonId,
+    client,
+  );
+  if ("roster" in rosterResult) {
+    const groundTruth = optionalSeasonStartGroundTruth(db, seasonId);
+    const live = buildLiveWeekPlan(
+      week,
+      rosterResult.roster,
+      mondayDate,
+      tuesdayDate,
+      config.US_SQUASH_CLUB_ID,
+      court1,
+      court2,
+      config.US_SQUASH_CUSTOM_MATCH_TYPE,
+      groundTruth,
+    );
+    if (!liveWeekPlanResolvable(live)) {
+      const reason =
+        live.issues[0]?.reason ??
+        (live.items.length === 0
+          ? "No managed match reservations to create from the live roster."
+          : "Could not resolve the live roster for this week.");
+      return { error: reason };
+    }
+    return {
+      weekPlanId: "live-roster",
+      bulkSlotCount: allBulkSlotCourts(mondayDate, tuesdayDate, court1, court2)
+        .length,
+      managedMatchCount: live.items.length,
+      items: live.items.map((i) => ({
+        box: i.boxNumber,
+        date: i.playDate,
+        courtId: String(i.courtId),
+        slot: i.slot,
+        players: i.playerDisplayNames,
+      })),
+      missingExternal: [],
+    };
+  }
+
+  const stored = previewBookingFromStoredWeekPlan(
+    db,
+    config,
+    seasonId,
+    week,
+    mondayDate,
+    tuesdayDate,
+  );
+  if (!("error" in stored)) return stored;
+  return { error: rosterResult.error };
 }
 
 export function previewSeasonBulk(
@@ -699,6 +913,7 @@ export async function runSeasonBulkBooking(
       mondayReservationIdsJson: JSON.stringify(monIds),
       tuesdayReservationIdsJson: JSON.stringify(tueIds),
       convertedWeeksJson: "[]",
+      locallyConvertedSlotsJson: "[]",
       rawBulkResponseJson: JSON.stringify({ weeks: rawWeeks }),
     })
     .run();
@@ -911,21 +1126,6 @@ export async function runWeeklyConvert(
     };
   }
 
-  const plan = getLatestWeekPlan(db, input.seasonId, input.week);
-  if ("error" in plan) {
-    return {
-      runId: "",
-      status: "error",
-      message: "Week plan not found; generate the week in Weekly first.",
-      summary: {
-        holdKind: resolved.kind,
-        deleted: [],
-        created: [],
-        holdId: resolved.kind === "season" ? resolved.row.id : resolved.row.id,
-      },
-    };
-  }
-
   let mondayDate: string;
   let tuesdayDate: string;
   let reservationIds: string[] = [];
@@ -998,46 +1198,58 @@ export async function runWeeklyConvert(
     reservationIds = JSON.parse(resolved.row.externalReservationIdsJson) as string[];
   }
 
-  const pmap = playersMap(db);
-  const { items, missingExternal } = buildManagedMatchReservations(
-    plan.payload,
-    pmap,
+  const rosterResult = await fetchLiveBoxLeagueRosterForSeason(
+    db,
+    config,
     input.seasonId,
+    client,
+  );
+  if ("error" in rosterResult) {
+    return {
+      runId: "",
+      status: "error",
+      message: rosterResult.error,
+      summary: {
+        holdKind: resolved.kind,
+        deleted: [],
+        created: [],
+        holdId: resolved.row.id,
+      },
+    };
+  }
+
+  const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const live = buildLiveWeekPlan(
+    input.week,
+    rosterResult.roster,
     mondayDate,
     tuesdayDate,
     config.US_SQUASH_CLUB_ID,
     config.US_SQUASH_COURT_1_ID,
     config.US_SQUASH_COURT_2_ID,
     config.US_SQUASH_CUSTOM_MATCH_TYPE,
+    groundTruth,
   );
-  if (missingExternal.length > 0) {
+  if (!liveWeekPlanResolvable(live)) {
+    const reason =
+      live.issues[0]?.reason ??
+      (live.items.length === 0
+        ? "No managed match reservations to create from the live roster."
+        : "Could not resolve the live roster for this week.");
     return {
       runId: "",
       status: "error",
-      message: "Missing Club Locker player ids for: " + missingExternal.map(
-        (m) => m.displayName,
-      ).join(", "),
+      message: reason,
       summary: {
         holdKind: resolved.kind,
         deleted: [],
         created: [],
-        holdId: resolved.kind === "season" ? resolved.row.id : resolved.row.id,
+        holdId: resolved.row.id,
       },
     };
   }
-  if (items.length === 0) {
-    return {
-      runId: "",
-      status: "error",
-      message: "No managed match reservations to create.",
-      summary: {
-        holdKind: resolved.kind,
-        deleted: [],
-        created: [],
-        holdId: resolved.kind === "season" ? resolved.row.id : resolved.row.id,
-      },
-    };
-  }
+  const items: LiveManagedReservationItem[] = live.items;
+  const rosterById = new Map(rosterResult.roster.map((p) => [p.id, p]));
 
   const holdRefId = resolved.row.id;
   const deleted: ConvertResult["summary"]["deleted"] = [];
@@ -1075,7 +1287,11 @@ export async function runWeeklyConvert(
     ok: boolean;
     reservationId?: string;
   }[] = [];
-  for (const it of items) {
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]!;
+    if (i > 0) {
+      await sleepMs(paceBetweenMatchBookingsMs());
+    }
     const key = `b${it.boxNumber}-${it.playDate}-c${it.courtId}-${it.slot}`;
     const r = await client.createMatchReservation(
       config.US_SQUASH_CLUB_ID,
@@ -1095,6 +1311,15 @@ export async function runWeeklyConvert(
 
   const allOk = created.every((c) => c.ok);
   const runId = crypto.randomUUID();
+
+  if (allOk) {
+    persistWeekPlanAuditRow(
+      db,
+      input.seasonId,
+      input.week,
+      auditPayloadWithLocalPlayerIds(db, live.payload, rosterResult.roster),
+    );
+  }
 
   if (resolved.kind === "week") {
     db.update(bookingHolds)
@@ -1133,6 +1358,21 @@ export async function runWeeklyConvert(
     const key = `b${it.boxNumber}-${it.playDate}-c${it.courtId}-${it.slot}`;
     const c = created.find((x) => x.key === key);
     if (!c?.ok) continue;
+    const p1 = rosterById.get(it.ussquashPlayerIds[0]);
+    const p2 = rosterById.get(it.ussquashPlayerIds[1]);
+    if (!p1 || !p2) continue;
+    const player1Id = ensurePlayerRowFromUssquash(
+      db,
+      p1.id,
+      it.playerDisplayNames[0],
+      p1.rating,
+    );
+    const player2Id = ensurePlayerRowFromUssquash(
+      db,
+      p2.id,
+      it.playerDisplayNames[1],
+      p2.rating,
+    );
     try {
       db.insert(houseLeagueBookedOccurrences)
         .values({
@@ -1143,8 +1383,8 @@ export async function runWeeklyConvert(
           slot: it.slot,
           courtId: it.courtId,
           boxNumber: it.boxNumber,
-          player1Id: it.internalPlayerIds[0]!,
-          player2Id: it.internalPlayerIds[1]!,
+          player1Id,
+          player2Id,
           bookingRunId: runId,
           reservationId: c.reservationId ?? null,
         })
@@ -1161,6 +1401,236 @@ export async function runWeeklyConvert(
       ? `Conversion complete: ${created.length} match reservation(s) created.`
       : "Some match reservations failed — see summary.",
     summary: { holdKind, deleted, created, holdId: holdRefId },
+  };
+}
+
+export type RebookPlayDayResult = {
+  runId: string;
+  status: "ok" | "partial" | "error";
+  message: string;
+  summary: {
+    playDay: "mon" | "tue";
+    playDate: string;
+    created: { key: string; status: number; ok: boolean; reservationId?: string }[];
+  };
+};
+
+/**
+ * Create match reservations for one play day (Mon or Tue) on an already-converted week.
+ * Skips bulk-hold deletes — for refilling slots cancelled manually in Club Locker.
+ */
+export async function runRebookPlayDay(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    week: number;
+    playDay: "mon" | "tue";
+    holdId?: string;
+    startMondayDate?: string;
+    confirm: boolean;
+  },
+  client: UssquashClient = createUssquashClient(config),
+): Promise<RebookPlayDayResult> {
+  const emptySummary = {
+    playDay: input.playDay,
+    playDate: "",
+    created: [] as RebookPlayDayResult["summary"]["created"],
+  };
+  if (!input.confirm) {
+    return {
+      runId: "",
+      status: "error",
+      message: "confirm must be true to execute",
+      summary: emptySummary,
+    };
+  }
+
+  let hold: SeasonHoldRow | undefined;
+  if (input.holdId) {
+    hold = findSeasonHold(db, input.seasonId, input.holdId);
+  } else if (input.startMondayDate) {
+    hold = findSeasonHoldForStartMonday(db, input.seasonId, input.startMondayDate);
+  } else {
+    hold = findSeasonHold(db, input.seasonId);
+  }
+  if (!hold) {
+    return {
+      runId: "",
+      status: "error",
+      message: "No season hold found for this season.",
+      summary: emptySummary,
+    };
+  }
+
+  const converted = JSON.parse(hold.convertedWeeksJson) as number[];
+  if (!converted.includes(input.week)) {
+    return {
+      runId: "",
+      status: "error",
+      message: `Week ${input.week} is not marked converted — use Convert visible week for the first booking run.`,
+      summary: emptySummary,
+    };
+  }
+
+  if (input.week < 1 || input.week > HOUSE_LEAGUE_SEMIS_WEEK_NUMBER - 1) {
+    return {
+      runId: "",
+      status: "error",
+      message: "Only regular season weeks 1–7 support play-day rebook.",
+      summary: emptySummary,
+    };
+  }
+
+  const dates = seasonPlayDates(db, hold.startMondayDate, input.week);
+  const mondayDate = dates.mondayDate;
+  const tuesdayDate = dates.tuesdayDate;
+  const playDate = input.playDay === "mon" ? mondayDate : tuesdayDate;
+
+  const rosterResult = await fetchLiveBoxLeagueRosterForSeason(
+    db,
+    config,
+    input.seasonId,
+    client,
+  );
+  if ("error" in rosterResult) {
+    return {
+      runId: "",
+      status: "error",
+      message: rosterResult.error,
+      summary: { ...emptySummary, playDate },
+    };
+  }
+
+  const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const live = buildLiveWeekPlan(
+    input.week,
+    rosterResult.roster,
+    mondayDate,
+    tuesdayDate,
+    config.US_SQUASH_CLUB_ID,
+    config.US_SQUASH_COURT_1_ID,
+    config.US_SQUASH_COURT_2_ID,
+    config.US_SQUASH_CUSTOM_MATCH_TYPE,
+    groundTruth,
+  );
+  if (!liveWeekPlanResolvable(live)) {
+    const reason =
+      live.issues[0]?.reason ??
+      (live.items.length === 0
+        ? "No managed match reservations to create from the live roster."
+        : "Could not resolve the live roster for this week.");
+    return {
+      runId: "",
+      status: "error",
+      message: reason,
+      summary: { ...emptySummary, playDate },
+    };
+  }
+
+  const items = live.items.filter((it) => it.playDate === playDate);
+  if (items.length === 0) {
+    return {
+      runId: "",
+      status: "error",
+      message: `No match slots found for ${playDate} in the live week plan.`,
+      summary: { ...emptySummary, playDate },
+    };
+  }
+
+  const rosterById = new Map(rosterResult.roster.map((p) => [p.id, p]));
+  const created: RebookPlayDayResult["summary"]["created"] = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]!;
+    if (i > 0) {
+      await sleepMs(paceBetweenMatchBookingsMs());
+    }
+    const key = `b${it.boxNumber}-${it.playDate}-c${it.courtId}-${it.slot}`;
+    const r = await client.createMatchReservation(
+      config.US_SQUASH_CLUB_ID,
+      it.body,
+    );
+    const reservationId =
+      r.status >= 200 && r.status < 300
+        ? extractReservationIdFromMatchResponse(r.data) ?? undefined
+        : undefined;
+    created.push({
+      key,
+      status: r.status,
+      ok: r.status >= 200 && r.status < 300,
+      reservationId,
+    });
+  }
+
+  const allOk = created.every((c) => c.ok);
+  const runId = crypto.randomUUID();
+  const dayLabel = input.playDay === "mon" ? "Monday" : "Tuesday";
+
+  db.insert(bookingRuns)
+    .values({
+      id: runId,
+      seasonId: input.seasonId,
+      kind: "rebook_play_day",
+      weekNumber: input.week,
+      status: allOk ? "ok" : "partial",
+      summaryJson: JSON.stringify({
+        playDay: input.playDay,
+        playDate,
+        created,
+        holdId: hold.id,
+      }),
+      holdId: null,
+    })
+    .run();
+
+  for (const it of items) {
+    const key = `b${it.boxNumber}-${it.playDate}-c${it.courtId}-${it.slot}`;
+    const c = created.find((x) => x.key === key);
+    if (!c?.ok) continue;
+    const p1 = rosterById.get(it.ussquashPlayerIds[0]);
+    const p2 = rosterById.get(it.ussquashPlayerIds[1]);
+    if (!p1 || !p2) continue;
+    const player1Id = ensurePlayerRowFromUssquash(
+      db,
+      p1.id,
+      it.playerDisplayNames[0],
+      p1.rating,
+    );
+    const player2Id = ensurePlayerRowFromUssquash(
+      db,
+      p2.id,
+      it.playerDisplayNames[1],
+      p2.rating,
+    );
+    try {
+      db.insert(houseLeagueBookedOccurrences)
+        .values({
+          id: crypto.randomUUID(),
+          seasonId: input.seasonId,
+          weekNumber: input.week,
+          playDate: it.playDate,
+          slot: it.slot,
+          courtId: it.courtId,
+          boxNumber: it.boxNumber,
+          player1Id,
+          player2Id,
+          bookingRunId: runId,
+          reservationId: c.reservationId ?? null,
+        })
+        .run();
+    } catch {
+      // UNIQUE: prior occurrence row may still exist after a manual Club Locker cancel.
+    }
+  }
+
+  const okCount = created.filter((c) => c.ok).length;
+  return {
+    runId,
+    status: allOk ? "ok" : "partial",
+    message: allOk
+      ? `${dayLabel} rebook complete: ${okCount} match reservation(s) created for ${playDate}.`
+      : `${dayLabel} rebook partial: ${okCount}/${items.length} match reservation(s) created — see summary.`,
+    summary: { playDay: input.playDay, playDate, created },
   };
 }
 
@@ -1594,7 +2064,7 @@ function previewItemReservationKey(item: {
   return `b${item.box}-${item.date}-c${item.courtId}-${item.slot}`;
 }
 
-export function getMatchReservationIdsForCalendarSlot(
+export async function getMatchReservationIdsForCalendarSlot(
   db: Db,
   config: AppConfig,
   input: {
@@ -1605,12 +2075,17 @@ export function getMatchReservationIdsForCalendarSlot(
     begin: string;
     end: string;
   },
-): { ids: string[] } | { error: string } {
+  client: UssquashClient = createUssquashClient(config),
+): Promise<{ ids: string[] } | { error: string }> {
   const dates = seasonWeekPlayDatesForDb(db, input.startMondayDate, input.week);
   if (input.date !== dates.firstPlayDate && input.date !== dates.secondPlayDate) {
     return { error: "That date is not a play day for this league week." };
   }
-  const preview = previewBooking(
+  let preview:
+    | {
+        items: { box: number; date: string; courtId: string; slot: string; players: string[] }[];
+      }
+    | { error: string } = previewBookingFromStoredWeekPlan(
     db,
     config,
     input.seasonId,
@@ -1619,7 +2094,18 @@ export function getMatchReservationIdsForCalendarSlot(
     dates.secondPlayDate,
   );
   if ("error" in preview) {
-    return { error: preview.error === "week_plan_missing" ? "Week plan not found." : preview.error };
+    preview = await previewBooking(
+      db,
+      config,
+      input.seasonId,
+      input.week,
+      dates.firstPlayDate,
+      dates.secondPlayDate,
+      client,
+    );
+  }
+  if ("error" in preview) {
+    return { error: preview.error };
   }
   const conv = latestConvertRunForWeek(db, input.seasonId, input.week);
   if (!conv) {
@@ -1656,15 +2142,20 @@ function twoPlayerVsFromNames(players: string[]): string | null {
   return `${a} v ${b}`;
 }
 
-function listMatchCancellableRowsForWeek(
+async function listMatchCancellableRowsForWeek(
   db: Db,
   config: AppConfig,
   seasonId: string,
   startMondayDate: string,
   week: number,
-): CancellableCalendarRow[] {
+  client: UssquashClient = createUssquashClient(config),
+): Promise<CancellableCalendarRow[]> {
   const dates = seasonWeekPlayDatesForDb(db, startMondayDate, week);
-  const preview = previewBooking(
+  let preview:
+    | {
+        items: { box: number; date: string; courtId: string; slot: string; players: string[] }[];
+      }
+    | { error: string } = previewBookingFromStoredWeekPlan(
     db,
     config,
     seasonId,
@@ -1672,6 +2163,17 @@ function listMatchCancellableRowsForWeek(
     dates.firstPlayDate,
     dates.secondPlayDate,
   );
+  if ("error" in preview) {
+    preview = await previewBooking(
+      db,
+      config,
+      seasonId,
+      week,
+      dates.firstPlayDate,
+      dates.secondPlayDate,
+      client,
+    );
+  }
   if ("error" in preview) return [];
 
   const conv = latestConvertRunForWeek(db, seasonId, week);
@@ -1730,12 +2232,13 @@ function listMatchCancellableRowsForWeek(
  * All cancellable rows for this season hold (every booked week: two play days per bulk week,
  * or match rows for converted weeks).
  */
-export function listAllCancellableBookings(
+export async function listAllCancellableBookings(
   db: Db,
   config: AppConfig,
   seasonId: string,
   startMondayDate: string,
-): CancellableCalendarRow[] {
+  client: UssquashClient = createUssquashClient(config),
+): Promise<CancellableCalendarRow[]> {
   const hold = findSeasonHoldForStartMonday(db, seasonId, startMondayDate);
   if (!hold) return [];
 
@@ -1749,7 +2252,14 @@ export function listAllCancellableBookings(
     for (let week = 1; week <= hold.seasonWeeks; week++) {
       if (converted.includes(week)) {
         rows.push(
-          ...listMatchCancellableRowsForWeek(db, config, seasonId, startMondayDate, week),
+          ...(await listMatchCancellableRowsForWeek(
+            db,
+            config,
+            seasonId,
+            startMondayDate,
+            week,
+            client,
+          )),
         );
       }
     }
@@ -1767,7 +2277,14 @@ export function listAllCancellableBookings(
   for (let week = 1; week <= hold.seasonWeeks; week++) {
     if (converted.includes(week)) {
       rows.push(
-        ...listMatchCancellableRowsForWeek(db, config, seasonId, startMondayDate, week),
+        ...(await listMatchCancellableRowsForWeek(
+          db,
+          config,
+          seasonId,
+          startMondayDate,
+          week,
+          client,
+        )),
       );
     } else if (hold.status === "active") {
       if (
@@ -1806,14 +2323,15 @@ export function listAllCancellableBookings(
 /**
  * Rows the booking calendar can cancel for one season week (subset of {@link listAllCancellableBookings}).
  */
-export function listCancellableBookingsForWeek(
+export async function listCancellableBookingsForWeek(
   db: Db,
   config: AppConfig,
   seasonId: string,
   startMondayDate: string,
   week: number,
-): CancellableCalendarRow[] {
-  return listAllCancellableBookings(db, config, seasonId, startMondayDate).filter(
+  client: UssquashClient = createUssquashClient(config),
+): Promise<CancellableCalendarRow[]> {
+  return (await listAllCancellableBookings(db, config, seasonId, startMondayDate, client)).filter(
     (r) => r.week === week,
   );
 }
@@ -1886,14 +2404,14 @@ export async function cancelBookingCalendarItems(
       if ("error" in r) return { ok: false, error: r.error };
       toDelete.push(...r.ids);
     } else {
-      const r = getMatchReservationIdsForCalendarSlot(db, config, {
+      const r = await getMatchReservationIdsForCalendarSlot(db, config, {
         seasonId: input.seasonId,
         startMondayDate: input.startMondayDate,
         week: item.week,
         date: item.date,
         begin: item.begin,
         end: item.end,
-      });
+      }, client);
       if ("error" in r) return { ok: false, error: r.error };
       toDelete.push(...r.ids);
     }
@@ -1954,6 +2472,214 @@ export function listSeasonBookingHolds(db: Db, seasonId: string) {
     .all();
 }
 
+function findLatestSeasonHoldRow(
+  db: Db,
+  seasonId: string,
+  startMondayDate: string,
+): SeasonHoldRow | undefined {
+  return db
+    .select()
+    .from(seasonBookingHolds)
+    .where(
+      and(
+        eq(seasonBookingHolds.seasonId, seasonId),
+        eq(seasonBookingHolds.startMondayDate, startMondayDate),
+      ),
+    )
+    .orderBy(desc(seasonBookingHolds.createdAt))
+    .get();
+}
+
+export type MarkWeekLocalDisplay = "bulk_held" | "converted";
+
+export type LocalBookingSlotRef = {
+  week: number;
+  date: string;
+  begin: string;
+  end: string;
+};
+
+export function localBookingSlotKey(slot: LocalBookingSlotRef): string {
+  return `${slot.week}|${slot.date}|${slot.begin}-${slot.end}`;
+}
+
+function parseLocallyConvertedSlotKeys(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((k): k is string => typeof k === "string" && k.includes("|"));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Update season-hold metadata so the booking calendar reflects Club Locker reality
+ * without calling Club Locker (green = bulk-held week, purple = converted week).
+ */
+export function markWeekBookingDisplayLocal(
+  db: Db,
+  input: {
+    seasonId: string;
+    startMondayDate: string;
+    week: number;
+    display: MarkWeekLocalDisplay;
+  },
+): { ok: true; message: string; holdId: string } | { ok: false; error: string } {
+  const hold = findLatestSeasonHoldRow(db, input.seasonId, input.startMondayDate);
+  if (!hold) {
+    return {
+      ok: false,
+      error:
+        "No season hold record for this start Monday. Run season block (bulk) once so a hold row exists, then mark locally.",
+    };
+  }
+  if (input.week < 1 || input.week > hold.seasonWeeks) {
+    return { ok: false, error: `Week must be 1–${hold.seasonWeeks} for this hold.` };
+  }
+
+  const converted = JSON.parse(hold.convertedWeeksJson) as number[];
+  const localSlots = parseLocallyConvertedSlotKeys(hold.locallyConvertedSlotsJson);
+  let nextConverted: number[];
+  let nextLocalSlots: string[];
+  let nextStatus: "active" | "fully_converted";
+
+  if (input.display === "bulk_held") {
+    nextConverted = converted.filter((w) => w !== input.week);
+    nextLocalSlots = localSlots.filter((k) => !k.startsWith(`${input.week}|`));
+    nextStatus = "active";
+  } else {
+    nextConverted = [...new Set([...converted, input.week])].sort((a, b) => a - b);
+    nextLocalSlots = localSlots.filter((k) => !k.startsWith(`${input.week}|`));
+    nextStatus =
+      nextConverted.length >= hold.seasonWeeks ? "fully_converted" : "active";
+    if (!latestConvertRunForWeek(db, input.seasonId, input.week)) {
+      db.insert(bookingRuns)
+        .values({
+          id: crypto.randomUUID(),
+          seasonId: input.seasonId,
+          kind: "convert",
+          weekNumber: input.week,
+          status: "ok",
+          summaryJson: JSON.stringify({
+            holdKind: "season",
+            deleted: [],
+            created: [],
+            holdId: hold.id,
+            localDisplayOnly: true,
+          }),
+          holdId: null,
+        })
+        .run();
+    }
+  }
+
+  db.update(seasonBookingHolds)
+    .set({
+      convertedWeeksJson: JSON.stringify(nextConverted),
+      locallyConvertedSlotsJson: JSON.stringify(nextLocalSlots),
+      status: nextStatus,
+    })
+    .where(eq(seasonBookingHolds.id, hold.id))
+    .run();
+
+  const label =
+    input.display === "bulk_held"
+      ? "bulk-held (green on calendar)"
+      : "converted to matches (purple on calendar)";
+  return {
+    ok: true,
+    holdId: hold.id,
+    message: `Week ${input.week} marked as ${label} in this app only. Club Locker was not changed.`,
+  };
+}
+
+/**
+ * Mark one league time row as converted (purple) or bulk-held (green) on the calendar only.
+ */
+export function markSlotBookingDisplayLocal(
+  db: Db,
+  input: {
+    seasonId: string;
+    startMondayDate: string;
+    week: number;
+    date: string;
+    begin: string;
+    end: string;
+    display: MarkWeekLocalDisplay;
+  },
+): { ok: true; message: string; holdId: string } | { ok: false; error: string } {
+  const hold = findLatestSeasonHoldRow(db, input.seasonId, input.startMondayDate);
+  if (!hold) {
+    return {
+      ok: false,
+      error:
+        "No season hold record for this start Monday. Run season block (bulk) once so a hold row exists.",
+    };
+  }
+  if (input.week < 1 || input.week > hold.seasonWeeks) {
+    return { ok: false, error: `Week must be 1–${hold.seasonWeeks} for this hold.` };
+  }
+
+  const convertedWeeks = JSON.parse(hold.convertedWeeksJson) as number[];
+  if (convertedWeeks.includes(input.week)) {
+    return {
+      ok: false,
+      error: `Week ${input.week} is already marked converted for the whole week — use “Show week as bulk-held” to revert.`,
+    };
+  }
+
+  const key = localBookingSlotKey(input);
+  const localSlots = new Set(parseLocallyConvertedSlotKeys(hold.locallyConvertedSlotsJson));
+
+  if (input.display === "converted") {
+    localSlots.add(key);
+  } else {
+    localSlots.delete(key);
+  }
+
+  db.update(seasonBookingHolds)
+    .set({
+      locallyConvertedSlotsJson: JSON.stringify([...localSlots].sort()),
+    })
+    .where(eq(seasonBookingHolds.id, hold.id))
+    .run();
+
+  const timeLabel = `${input.begin}–${input.end}`;
+  const label =
+    input.display === "converted"
+      ? "converted (purple on calendar)"
+      : "bulk-held (green on calendar)";
+  return {
+    ok: true,
+    holdId: hold.id,
+    message: `${formatISODateLongEn(input.date)} ${timeLabel} marked as ${label} in this app only. Club Locker was not changed.`,
+  };
+}
+
+function formatISODateLongEn(iso: string): string {
+  const [y, mo, day] = iso.split("-").map(Number);
+  if (!y || !mo || !day) return iso;
+  const d = new Date(y, mo - 1, day);
+  const weekdayShort = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
+  const monthShort = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ][d.getMonth()];
+  return `${weekdayShort}, ${monthShort} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
 /**
  * Remove a season bulk hold row (local `season_booking_holds` only). Use after deleting the
  * recurring clinics in Club Locker so a new `season-bulk` run is allowed.
@@ -2001,4 +2727,230 @@ export function listBookingRuns(
     .orderBy(desc(bookingRuns.createdAt))
     .limit(limit)
     .all();
+}
+
+/** TEMP: fixed Stadium test window (verified open in Club Locker). */
+export const STADIUM_ID_MAP_TEST_SLOT = { begin: "15:10", end: "15:50" } as const;
+
+/**
+ * TEMP: Book Stadium-court players from one green bulk slot at 15:10 using the same
+ * live-roster resolution as Convert Visible Week (ussquash player ids → Club Locker).
+ */
+export async function runStadiumIdMapTestBooking(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    week: number;
+    mondayDate: string;
+    tuesdayDate: string;
+    date: string;
+    sourceBegin: string;
+    sourceEnd: string;
+  },
+  client: UssquashClient = createUssquashClient(config),
+) {
+  const rosterResult = await fetchLiveBoxLeagueRosterForSeason(
+    db,
+    config,
+    input.seasonId,
+    client,
+  );
+  if ("error" in rosterResult) {
+    return { ok: false as const, message: rosterResult.error };
+  }
+
+  const court1Id = config.US_SQUASH_COURT_1_ID;
+  const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const live = buildLiveWeekPlan(
+    input.week,
+    rosterResult.roster,
+    input.mondayDate,
+    input.tuesdayDate,
+    config.US_SQUASH_CLUB_ID,
+    court1Id,
+    config.US_SQUASH_COURT_2_ID,
+    config.US_SQUASH_CUSTOM_MATCH_TYPE,
+    groundTruth,
+  );
+  if (!liveWeekPlanResolvable(live)) {
+    const reason =
+      live.issues[0]?.reason ??
+      (live.items.length === 0
+        ? "No managed match reservations to create from the live roster."
+        : "Could not resolve the live roster for this week.");
+    return { ok: false as const, message: reason };
+  }
+
+  const sourceSlot = formatReservationSlot(input.sourceBegin, input.sourceEnd);
+  const match = live.items.find(
+    (it) =>
+      it.playDate === input.date &&
+      it.courtId === court1Id &&
+      it.slot === sourceSlot,
+  );
+  if (!match) {
+    return {
+      ok: false as const,
+      message: `No Stadium match found for ${input.date} ${sourceSlot} in the live week plan.`,
+    };
+  }
+
+  const [player1SsmId, player2SsmId] = match.ussquashPlayerIds;
+  const [player1Name, player2Name] = match.playerDisplayNames;
+  const booking = await runSingleCourtMatchBooking(config, {
+    date: input.date,
+    slotBegin: STADIUM_ID_MAP_TEST_SLOT.begin,
+    slotEnd: STADIUM_ID_MAP_TEST_SLOT.end,
+    courtSide: "stadium",
+    player1SsmId,
+    player2SsmId,
+    player1Name,
+    player2Name,
+  });
+
+  return {
+    ok: booking.ok,
+    message: booking.message,
+    sourceMatch: {
+      boxNumber: match.boxNumber,
+      player1SsmId,
+      player2SsmId,
+      player1Name,
+      player2Name,
+    },
+    testSlot: STADIUM_ID_MAP_TEST_SLOT,
+    booking,
+  };
+}
+
+export type BookSlotBothCourtsCourtResult = {
+  courtSide: "stadium" | "center";
+  boxNumber: number;
+  player1Name: string;
+  player2Name: string;
+  ok: boolean;
+  message: string;
+};
+
+export type BookSlotBothCourtsNoBulkCancelResult = {
+  ok: boolean;
+  message: string;
+  courts: BookSlotBothCourtsCourtResult[];
+};
+
+/**
+ * Book Stadium and Center matches for one green bulk slot from the live US Squash roster.
+ * Does not cancel bulk holds (overlapping bulk + match is possible until converted).
+ */
+export async function runBookSlotBothCourtsNoBulkCancel(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    week: number;
+    mondayDate: string;
+    tuesdayDate: string;
+    date: string;
+    begin: string;
+    end: string;
+  },
+  client: UssquashClient = createUssquashClient(config),
+): Promise<BookSlotBothCourtsNoBulkCancelResult> {
+  const rosterResult = await fetchLiveBoxLeagueRosterForSeason(
+    db,
+    config,
+    input.seasonId,
+    client,
+  );
+  if ("error" in rosterResult) {
+    return { ok: false, message: rosterResult.error, courts: [] };
+  }
+
+  const court1Id = config.US_SQUASH_COURT_1_ID;
+  const court2Id = config.US_SQUASH_COURT_2_ID;
+  const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const live = buildLiveWeekPlan(
+    input.week,
+    rosterResult.roster,
+    input.mondayDate,
+    input.tuesdayDate,
+    config.US_SQUASH_CLUB_ID,
+    court1Id,
+    court2Id,
+    config.US_SQUASH_CUSTOM_MATCH_TYPE,
+    groundTruth,
+  );
+  if (!liveWeekPlanResolvable(live)) {
+    const reason =
+      live.issues[0]?.reason ??
+      (live.items.length === 0
+        ? "No managed match reservations to create from the live roster."
+        : "Could not resolve the live roster for this week.");
+    return { ok: false, message: reason, courts: [] };
+  }
+
+  const sourceSlot = formatReservationSlot(input.begin, input.end);
+  const stadiumMatch = live.items.find(
+    (it) =>
+      it.playDate === input.date &&
+      it.courtId === court1Id &&
+      it.slot === sourceSlot,
+  );
+  const centerMatch = live.items.find(
+    (it) =>
+      it.playDate === input.date &&
+      it.courtId === court2Id &&
+      it.slot === sourceSlot,
+  );
+  if (!stadiumMatch && !centerMatch) {
+    return {
+      ok: false,
+      message: `No Stadium or Center match found for ${input.date} ${sourceSlot} in the live week plan.`,
+      courts: [],
+    };
+  }
+
+  const courts: BookSlotBothCourtsCourtResult[] = [];
+  const pairs: {
+    courtSide: "stadium" | "center";
+    match: (typeof live.items)[number];
+  }[] = [];
+  if (stadiumMatch) pairs.push({ courtSide: "stadium", match: stadiumMatch });
+  if (centerMatch) pairs.push({ courtSide: "center", match: centerMatch });
+
+  for (const { courtSide, match } of pairs) {
+    const [player1SsmId, player2SsmId] = match.ussquashPlayerIds;
+    const [player1Name, player2Name] = match.playerDisplayNames;
+    const booking = await runSingleCourtMatchBooking(config, {
+      date: input.date,
+      slotBegin: input.begin,
+      slotEnd: input.end,
+      courtSide,
+      player1SsmId,
+      player2SsmId,
+      player1Name,
+      player2Name,
+    });
+    courts.push({
+      courtSide,
+      boxNumber: match.boxNumber,
+      player1Name,
+      player2Name,
+      ok: booking.ok,
+      message: booking.message,
+    });
+  }
+
+  const allOk = courts.every((c) => c.ok);
+  const anyOk = courts.some((c) => c.ok);
+  const label = (c: BookSlotBothCourtsCourtResult) =>
+    `${c.courtSide === "stadium" ? "Stadium" : "Center"}: ${c.player1Name} vs ${c.player2Name}`;
+  const message = allOk
+    ? `Booked ${courts.length} match${courts.length === 1 ? "" : "es"} (${courts.map(label).join("; ")}).`
+    : anyOk
+      ? `Partial booking: ${courts.map((c) => `${label(c)} — ${c.ok ? "ok" : c.message}`).join("; ")}`
+      : courts.map((c) => `${label(c)}: ${c.message}`).join("; ");
+
+  return { ok: allOk, message, courts };
 }

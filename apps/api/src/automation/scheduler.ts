@@ -10,6 +10,7 @@ import { runWithExecution, type ExecutionTrigger, type StepRuntimeMode } from ".
 import { shouldAutoSendForCurrentMode } from "./settings.js";
 import { processScheduledOutbox } from "../houseLeague/scheduledOutbox.js";
 import { processHouseLeagueMatchReminders } from "../houseLeague/matchReminderScheduler.js";
+import { processWeeklyBoxEmails } from "../houseLeague/weeklyBoxEmailScheduler.js";
 
 type FollowupKind =
   | "round_announce"
@@ -247,6 +248,23 @@ export async function runSchedulerTick(
       result.staged += hl.staged;
       result.sent += hl.sent;
       result.skipped += hl.skipped;
+
+      const weeklyBox = await ctx.step(
+        "house_league_weekly_box_emails",
+        {},
+        async () =>
+          processWeeklyBoxEmails(
+            db,
+            config,
+            emailAdapter,
+            now,
+            autoSend,
+            mode,
+          ),
+      );
+      result.staged += weeklyBox.staged;
+      result.sent += weeklyBox.sent;
+      result.skipped += weeklyBox.skipped;
 
       return result;
     },
