@@ -661,8 +661,18 @@ function formatSeatMatchupAsNamesFromRoster(
   ) {
     return OPEN_BOX_SEAT_LABEL;
   }
-  const p1 = livePlayerAtScheduleSeat(boxLevel, pair[0], roster, groundTruth);
-  const p2 = livePlayerAtScheduleSeat(boxLevel, pair[1], roster, groundTruth);
+  const p1 = livePlayerAtScheduleSeat(
+    boxLevel,
+    pair[0],
+    roster,
+    groundTruth,
+  ) as BoxLeaguePlayerForMatchups | null;
+  const p2 = livePlayerAtScheduleSeat(
+    boxLevel,
+    pair[1],
+    roster,
+    groundTruth,
+  ) as BoxLeaguePlayerForMatchups | null;
   if (!p1 || !p2) return formatCompactMatchPair(pair);
   const n1 = `${p1.firstName.trim()} ${p1.lastName.trim()}`.trim();
   const n2 = `${p2.firstName.trim()} ${p2.lastName.trim()}`.trim();
@@ -2092,7 +2102,7 @@ export function BookingPage({
         }
         onLog(res.message);
         await refreshLocalSeasonHolds();
-        setSeasonBulkFeedback({ kind: "ok", message: res.message });
+        setSeasonBulkFeedback({ kind: "success", message: res.message });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         onLog(msg);
@@ -2143,7 +2153,7 @@ export function BookingPage({
         }
         onLog(res.message);
         await refreshLocalSeasonHolds();
-        setSeasonBulkFeedback({ kind: "ok", message: res.message });
+        setSeasonBulkFeedback({ kind: "success", message: res.message });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         onLog(msg);
@@ -2565,6 +2575,7 @@ export function BookingPage({
             seasonWeeks: selectedSeasonWeeks,
             status: "active",
             convertedWeeks: [],
+            locallyConvertedSlotKeys: new Set(),
           });
         }
         await refreshLocalSeasonHolds();
