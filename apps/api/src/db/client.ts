@@ -388,6 +388,53 @@ function migrateBoxEmlTemplateAssetsTable(sqlite: InstanceType<typeof Database>)
   `);
 }
 
+function migrateBookingTables(sqlite: InstanceType<typeof Database>) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS booking_proposals (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      week_number integer NOT NULL,
+      status text NOT NULL DEFAULT 'draft',
+      payload_json text NOT NULL,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS booking_holds (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      week_number integer NOT NULL,
+      monday_date text NOT NULL,
+      tuesday_date text NOT NULL,
+      status text NOT NULL DEFAULT 'active',
+      external_reservation_ids_json text NOT NULL,
+      raw_bulk_response_json text,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS booking_runs (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      kind text NOT NULL,
+      week_number integer,
+      status text NOT NULL,
+      summary_json text NOT NULL,
+      hold_id text REFERENCES booking_holds(id),
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS season_booking_holds (
+      id text PRIMARY KEY,
+      season_id text NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      start_monday_date text NOT NULL,
+      season_weeks integer NOT NULL,
+      status text NOT NULL DEFAULT 'active',
+      monday_reservation_ids_json text NOT NULL,
+      tuesday_reservation_ids_json text NOT NULL,
+      converted_weeks_json text NOT NULL DEFAULT '[]',
+      locally_converted_slots_json text NOT NULL DEFAULT '[]',
+      raw_bulk_response_json text,
+      created_at text NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+}
+
 function migrateHouseLeagueWeeklyBoxSends(sqlite: InstanceType<typeof Database>) {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS house_league_weekly_box_sends (
@@ -426,6 +473,7 @@ export function createDb(databaseUrl: string) {
   migrateEmailTemplatesTable(sqlite);
   migrateStatutoryHolidaysTable(sqlite);
   migrateAutomationTables(sqlite);
+  migrateBookingTables(sqlite);
   migrateEmailOutboxAndHouseLeagueReminders(sqlite);
   migrateFeedbackTicketsTable(sqlite);
   migrateBoxEmlTemplateAssetsTable(sqlite);
