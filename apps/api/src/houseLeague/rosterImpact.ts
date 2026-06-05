@@ -129,7 +129,12 @@ function statHolidayRegistryFromDb(db: Db): StatHoliday[] {
     .map((r) => ({
       name: r.name,
       date: r.date,
-      hours: { open: r.openTime, close: r.closeTime },
+      hours: {
+        open: r.openTime,
+        close: r.closeTime,
+        closed: r.closed === 1,
+      },
+      kind: r.closureKind === "event" ? ("event" as const) : ("holiday" as const),
     }));
 }
 

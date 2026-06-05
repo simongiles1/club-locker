@@ -49,6 +49,17 @@ export type HouseLeagueWeeklyEmailTemplateSettings = {
   };
 };
 
+export type PartialHouseLeagueWeeklyEmailTemplateSettings = {
+  perBox?: {
+    managed?: Partial<BoxEmlTemplatePair>;
+    unmanaged?: Partial<BoxEmlTemplatePair>;
+  };
+  perMatchup?: {
+    managed?: Partial<BoxEmlTemplatePair>;
+    unmanaged?: Partial<BoxEmlTemplatePair>;
+  };
+};
+
 /** @deprecated Use HouseLeagueWeeklyEmailTemplateSettings */
 export type HouseLeagueWeeklyBoxEmailTemplateSettings = HouseLeagueWeeklyEmailTemplateSettings;
 

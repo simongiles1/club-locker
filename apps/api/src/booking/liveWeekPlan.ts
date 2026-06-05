@@ -6,20 +6,32 @@ import {
   MANAGED_BOX_NUMBER_MAX,
   scheduleMatchPairNeedsCourtBooking,
   REGULAR_SEASON_GRID_WEEKS,
+  type BoxRelativeRankIdentifiedPlayer,
 } from "@squash/shared";
 import type { CreateMatchReservationBody } from "./clubLockerClient.js";
 import { formatReservationSlot } from "./slotMap.js";
 import type { WeekPlanBox, WeekPlanPayload } from "./payloads.js";
 
 /** US Squash box league player row (subset used for booking). */
-export type LiveBoxLeaguePlayer = {
-  id: number;
+export type LiveBoxLeaguePlayer = BoxRelativeRankIdentifiedPlayer & {
   firstName: string;
   lastName: string;
-  level: number;
-  playerCurrentRank: number;
   rating: number;
 };
+
+function livePlayerAtSeat(
+  boxNumber: number,
+  seat: number,
+  roster: readonly LiveBoxLeaguePlayer[],
+  groundTruthRoster?: readonly BoxRelativeRankIdentifiedPlayer[],
+): LiveBoxLeaguePlayer | null {
+  return livePlayerAtScheduleSeat(
+    boxNumber,
+    seat,
+    roster,
+    groundTruthRoster,
+  ) as LiveBoxLeaguePlayer | null;
+}
 
 export function normalizeLiveBoxLeaguePlayers(data: unknown): LiveBoxLeaguePlayer[] {
   if (!Array.isArray(data)) return [];
@@ -118,7 +130,7 @@ export function buildLiveWeekPlan(
   court1Id: number,
   court2Id: number,
   customMatchType: number,
-  groundTruthRoster?: readonly LiveBoxLeaguePlayer[],
+  groundTruthRoster?: readonly BoxRelativeRankIdentifiedPlayer[],
 ): BuildLiveWeekPlanResult {
   if (week < 1 || week > REGULAR_SEASON_GRID_WEEKS) {
     return {
@@ -150,13 +162,13 @@ export function buildLiveWeekPlan(
     if (!row) {
       const matchups: [string | undefined, string | undefined][] = mu.matches.map(
         ([a, b]) => {
-          const pa = livePlayerAtScheduleSeat(
+          const pa = livePlayerAtSeat(
             boxNumber,
             a,
             roster,
             groundTruthRoster,
           );
-          const pb = livePlayerAtScheduleSeat(
+          const pb = livePlayerAtSeat(
             boxNumber,
             b,
             roster,
@@ -205,13 +217,13 @@ export function buildLiveWeekPlan(
         ) {
           continue;
         }
-        const p1 = livePlayerAtScheduleSeat(
+        const p1 = livePlayerAtSeat(
           boxNumber,
           seatPair[0],
           roster,
           groundTruthRoster,
         );
-        const p2 = livePlayerAtScheduleSeat(
+        const p2 = livePlayerAtSeat(
           boxNumber,
           seatPair[1],
           roster,

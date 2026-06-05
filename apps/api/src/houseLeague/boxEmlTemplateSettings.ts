@@ -42,6 +42,11 @@ export type HouseLeagueBoxEmlTemplateSettings = {
   unmanaged: BoxEmlTemplatePair;
 };
 
+export type PartialHouseLeagueBoxEmlTemplateSettings = {
+  managed?: Partial<BoxEmlTemplatePair>;
+  unmanaged?: Partial<BoxEmlTemplatePair>;
+};
+
 function keysForPurpose(purpose: BoxEmlTemplatePurpose) {
   return purpose === "box_modification"
     ? BOX_EML_TEMPLATE_KEYS_MODIFICATION

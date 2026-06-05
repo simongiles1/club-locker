@@ -55,6 +55,7 @@ import {
   getHouseLeagueWeeklyEmailTemplateSettings,
   weeklyTemplatePairForManagedBox,
   type HouseLeagueWeeklyEmailTemplateSettings,
+  type PartialHouseLeagueWeeklyEmailTemplateSettings,
 } from "./weeklyBoxEmailTemplateSettings.js";
 
 export type WeeklyBoxPreviewRow = {
@@ -284,8 +285,8 @@ function bookedMatchForSeatPair(
   localPlayerIds: Map<number, string>,
   config: AppConfig,
 ): WeeklyBookedMatchLine | undefined {
-  const p1 = livePlayerAtScheduleSeat(boxNumber, pair[0], roster, groundTruthRoster);
-  const p2 = livePlayerAtScheduleSeat(boxNumber, pair[1], roster, groundTruthRoster);
+  const p1 = playerInBoxForSeat(boxNumber, pair[0], roster, groundTruthRoster);
+  const p2 = playerInBoxForSeat(boxNumber, pair[1], roster, groundTruthRoster);
   if (!p1 || !p2) return undefined;
   const local1 = localPlayerIds.get(p1.id);
   const local2 = localPlayerIds.get(p2.id);
@@ -420,7 +421,7 @@ export async function buildWeeklyBoxEmailBundle(
   config: AppConfig,
   seasonId: string,
   weekNumber: number,
-  templateOverride?: Partial<HouseLeagueWeeklyEmailTemplateSettings>,
+  templateOverride?: PartialHouseLeagueWeeklyEmailTemplateSettings,
   client?: UssquashClient,
 ): Promise<WeeklyBoxEmailBundle | { error: string }> {
   const ussquash = client ?? createUssquashClient(config);
@@ -899,7 +900,7 @@ export async function buildWeeklyBoxEmlZipBuffer(
   seasonId: string,
   weekNumber: number,
   options?: {
-    templateOverride?: Partial<HouseLeagueWeeklyEmailTemplateSettings>;
+    templateOverride?: PartialHouseLeagueWeeklyEmailTemplateSettings;
     fromEmail?: string;
     fromName?: string;
   },

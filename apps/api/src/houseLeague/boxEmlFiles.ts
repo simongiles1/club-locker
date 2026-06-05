@@ -13,6 +13,7 @@ import {
   renderBoxSeasonScheduleEmailText,
   type BoxEmlTemplatePurpose,
   type BoxScheduleSeatPlayer,
+  type BoxRelativeRankIdentifiedPlayer,
 } from "@squash/shared";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
@@ -32,7 +33,7 @@ import {
   getHouseLeagueBoxEmlTemplateSettings,
   templatePairForManagedBox,
   type BoxEmlTemplatePair,
-  type HouseLeagueBoxEmlTemplateSettings,
+  type PartialHouseLeagueBoxEmlTemplateSettings,
 } from "./boxEmlTemplateSettings.js";
 import { inlineEmlTemplateAssets } from "./boxEmlAssets.js";
 import {
@@ -106,12 +107,12 @@ function emailForPlayer(
 function seatPlayersForBox(
   boxNumber: number,
   roster: readonly LiveBoxLeaguePlayer[],
-  groundTruthRoster?: readonly LiveBoxLeaguePlayer[],
+  groundTruthRoster?: readonly BoxRelativeRankIdentifiedPlayer[],
 ): BoxScheduleSeatPlayer[] {
   return buildBoxScheduleSeatPlayers({
     boxNumber,
     roster,
-    displayName: livePlayerDisplayName,
+    displayName: (p) => livePlayerDisplayName(p as LiveBoxLeaguePlayer),
     groundTruthRoster,
   });
 }
@@ -188,7 +189,7 @@ export async function buildHouseLeagueBoxEmlBundle(
   db: Db,
   config: AppConfig,
   seasonId: string,
-  templateOverride?: Partial<HouseLeagueBoxEmlTemplateSettings>,
+  templateOverride?: PartialHouseLeagueBoxEmlTemplateSettings,
   client?: UssquashClient,
   templatePurpose: BoxEmlTemplatePurpose = "season_start",
 ): Promise<BoxEmlBundle | { error: string }> {
@@ -437,7 +438,7 @@ export async function buildHouseLeagueBoxEmlZipBuffer(
   db: Db,
   config: AppConfig,
   seasonId: string,
-  templateOverride?: Partial<HouseLeagueBoxEmlTemplateSettings>,
+  templateOverride?: PartialHouseLeagueBoxEmlTemplateSettings,
   templatePurpose: BoxEmlTemplatePurpose = "season_start",
 ): Promise<{ buffer: Buffer; filename: string } | { error: string }> {
   const bundle = await buildHouseLeagueBoxEmlBundle(
