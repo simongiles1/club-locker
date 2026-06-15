@@ -98,6 +98,12 @@ function migrateSqliteSeasonsColumns(sqlite: InstanceType<typeof Database>) {
     "season_start_roster_saved_at",
     "season_start_roster_saved_at text",
   );
+  ensureColumn(
+    sqlite,
+    "seasons",
+    "relative_rank_overrides_json",
+    "relative_rank_overrides_json text",
+  );
 }
 
 /** Idempotent CREATE TABLE statements for the championships feature. */

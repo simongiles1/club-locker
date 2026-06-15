@@ -28,6 +28,7 @@ import {
   type LiveBoxLeaguePlayer,
   type LiveManagedReservationItem,
 } from "./liveWeekPlan.js";
+import { loadAndApplyRelativeRankOverrides, loadSeatOverridesForSeason } from "../houseLeague/relativeRankOverrides.js";
 import {
   BULK_MONDAY_TIME_WINDOWS,
   BULK_TUESDAY_TIME_WINDOWS,
@@ -55,6 +56,11 @@ function optionalSeasonStartGroundTruth(
     seasonId,
   ) as LiveBoxLeaguePlayer[];
   return gt.length > 0 ? gt : undefined;
+}
+
+function optionalSeatOverrides(db: Db, seasonId: string) {
+  const overrides = loadSeatOverridesForSeason(db, seasonId);
+  return overrides.size > 0 ? overrides : undefined;
 }
 type SeasonHoldRow = InferSelectModel<typeof seasonBookingHolds>;
 type WeekHoldRow = InferSelectModel<typeof bookingHolds>;
@@ -359,7 +365,7 @@ export async function fetchLiveBoxLeagueRosterForSeason(
   if (roster.length === 0) {
     return { error: "US Squash box league roster is empty." };
   }
-  return { roster };
+  return { roster: loadAndApplyRelativeRankOverrides(db, seasonId, roster) };
 }
 
 export function ensurePlayerRowFromUssquash(
@@ -514,6 +520,7 @@ export async function previewBooking(
   );
   if ("roster" in rosterResult) {
     const groundTruth = optionalSeasonStartGroundTruth(db, seasonId);
+    const seatOverrides = optionalSeatOverrides(db, seasonId);
     const live = buildLiveWeekPlan(
       week,
       rosterResult.roster,
@@ -524,6 +531,7 @@ export async function previewBooking(
       court2,
       config.US_SQUASH_CUSTOM_MATCH_TYPE,
       groundTruth,
+      seatOverrides,
     );
     if (!liveWeekPlanResolvable(live)) {
       const reason =
@@ -1219,6 +1227,7 @@ export async function runWeeklyConvert(
   }
 
   const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const seatOverrides = optionalSeatOverrides(db, input.seasonId);
   const live = buildLiveWeekPlan(
     input.week,
     rosterResult.roster,
@@ -1229,6 +1238,7 @@ export async function runWeeklyConvert(
     config.US_SQUASH_COURT_2_ID,
     config.US_SQUASH_CUSTOM_MATCH_TYPE,
     groundTruth,
+    seatOverrides,
   );
   if (!liveWeekPlanResolvable(live)) {
     const reason =
@@ -1503,6 +1513,7 @@ export async function runRebookPlayDay(
   }
 
   const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const seatOverrides = optionalSeatOverrides(db, input.seasonId);
   const live = buildLiveWeekPlan(
     input.week,
     rosterResult.roster,
@@ -1513,6 +1524,7 @@ export async function runRebookPlayDay(
     config.US_SQUASH_COURT_2_ID,
     config.US_SQUASH_CUSTOM_MATCH_TYPE,
     groundTruth,
+    seatOverrides,
   );
   if (!liveWeekPlanResolvable(live)) {
     const reason =
@@ -2762,6 +2774,7 @@ export async function runStadiumIdMapTestBooking(
 
   const court1Id = config.US_SQUASH_COURT_1_ID;
   const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const seatOverrides = optionalSeatOverrides(db, input.seasonId);
   const live = buildLiveWeekPlan(
     input.week,
     rosterResult.roster,
@@ -2772,6 +2785,7 @@ export async function runStadiumIdMapTestBooking(
     config.US_SQUASH_COURT_2_ID,
     config.US_SQUASH_CUSTOM_MATCH_TYPE,
     groundTruth,
+    seatOverrides,
   );
   if (!liveWeekPlanResolvable(live)) {
     const reason =
@@ -2870,6 +2884,7 @@ export async function runBookSlotBothCourtsNoBulkCancel(
   const court1Id = config.US_SQUASH_COURT_1_ID;
   const court2Id = config.US_SQUASH_COURT_2_ID;
   const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const seatOverrides = optionalSeatOverrides(db, input.seasonId);
   const live = buildLiveWeekPlan(
     input.week,
     rosterResult.roster,
@@ -2880,6 +2895,7 @@ export async function runBookSlotBothCourtsNoBulkCancel(
     court2Id,
     config.US_SQUASH_CUSTOM_MATCH_TYPE,
     groundTruth,
+    seatOverrides,
   );
   if (!liveWeekPlanResolvable(live)) {
     const reason =

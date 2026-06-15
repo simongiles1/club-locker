@@ -82,10 +82,17 @@ type Tab = "houseleague" | "championships" | "members" | "feedback";
 /** Members tab still renders when active; toggle to show the nav link again. */
 const SHOW_MEMBERS_IN_NAV = false;
 
+type ClubLockerHealthState =
+  | "loading"
+  | "ok"
+  | { message: string };
+
 export function App() {
   const [tab, setTab] = useState<Tab>("houseleague");
   const [seasons, setSeasons] = useState<Season[]>([]);
   const [seasonId, setSeasonId] = useState<string>("");
+  const [clubLockerHealth, setClubLockerHealth] =
+    useState<ClubLockerHealthState>("loading");
 
   const refreshSeasons = useCallback(async () => {
     const s = await api<Season[]>("/api/seasons");
@@ -106,6 +113,35 @@ export function App() {
   useEffect(() => {
     refreshSeasons().catch((e) => console.error(e));
   }, [refreshSeasons]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/club-locker-health");
+        const data = (await res.json()) as { ok?: boolean; message?: string };
+        if (cancelled) return;
+        if (res.ok && data.ok) {
+          setClubLockerHealth("ok");
+          return;
+        }
+        setClubLockerHealth({
+          message:
+            data.message ??
+            "Club Locker health check failed — verify server credentials.",
+        });
+      } catch {
+        if (!cancelled) {
+          setClubLockerHealth({
+            message: "Could not reach the API for Club Locker health check.",
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /** Championships are keyed by club-booking year; align with canonical segment row. */
   useEffect(() => {
@@ -158,13 +194,20 @@ export function App() {
     seasons.find((x) => x.id === seasonId) ?? null;
 
   return (
-    <div
-      className={
-        tab === "members" || tab === "houseleague"
-          ? "layout layout--fill-viewport"
-          : "layout"
-      }
-    >
+    <>
+      {clubLockerHealth !== "loading" && clubLockerHealth !== "ok" ? (
+        <div className="app-health-alert" role="alert">
+          <strong>Club Locker authentication issue.</strong>{" "}
+          {clubLockerHealth.message}
+        </div>
+      ) : null}
+      <div
+        className={
+          tab === "members" || tab === "houseleague"
+            ? "layout layout--fill-viewport"
+            : "layout"
+        }
+      >
       <nav>
         <strong>CL Automation</strong>
         <button
@@ -235,6 +278,7 @@ export function App() {
         {tab === "feedback" && <FeedbackPage />}
         {tab === "members" && <MembersPage />}
       </main>
-    </div>
+      </div>
+    </>
   );
 }

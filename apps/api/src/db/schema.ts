@@ -34,6 +34,8 @@ export const seasons = sqliteTable("seasons", {
   seasonStartRosterJson: text("season_start_roster_json"),
   /** ISO timestamp when `seasonStartRosterJson` was last saved. */
   seasonStartRosterSavedAt: text("season_start_roster_saved_at"),
+  /** JSON map of US Squash player id → relative rank (1–6) within box; overrides Club Locker order. */
+  relativeRankOverridesJson: text("relative_rank_overrides_json"),
   createdAt: text("created_at")
     .notNull()
     .default(sql`(datetime('now'))`),

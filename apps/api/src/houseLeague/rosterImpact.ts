@@ -35,6 +35,7 @@ import {
   seasonPlayDates,
 } from "../booking/service.js";
 import { loadSeasonStartGroundTruthPlayers } from "./seasonStartRoster.js";
+import { loadSeatOverridesForSeason } from "./relativeRankOverrides.js";
 import { stageWeeklyBoxEmails } from "./weeklyBoxEmail.js";
 import type { EmailAdapter } from "../adapters/email.js";
 import type { LiveBoxLeaguePlayer } from "../booking/liveWeekPlan.js";
@@ -320,6 +321,7 @@ export async function computeHouseLeagueRosterImpact(
       config.US_SQUASH_COURT_2_ID,
       config.US_SQUASH_CUSTOM_MATCH_TYPE,
       groundTruthRoster.length > 0 ? groundTruthRoster : undefined,
+      loadSeatOverridesForSeason(db, seasonId),
     );
 
     if (live.issues.length > 0) {
@@ -721,6 +723,7 @@ export async function applyHouseLeagueRosterBookingUpdates(
       config.US_SQUASH_COURT_2_ID,
       config.US_SQUASH_CUSTOM_MATCH_TYPE,
       groundTruthRoster.length > 0 ? groundTruthRoster : undefined,
+      loadSeatOverridesForSeason(db, input.seasonId),
     );
 
     if (!liveWeekPlanResolvable(live)) {
@@ -959,6 +962,7 @@ export async function applyHouseLeagueRosterCourtSlot(
     config.US_SQUASH_COURT_2_ID,
     config.US_SQUASH_CUSTOM_MATCH_TYPE,
     groundTruthRoster.length > 0 ? groundTruthRoster : undefined,
+    loadSeatOverridesForSeason(db, input.seasonId),
   );
   const key = slotKey({
     weekNumber: input.weekNumber,

@@ -10,6 +10,7 @@ import {
   CalendarDays,
   CalendarOff,
   ChevronDown,
+  ChevronUp,
   Download,
   Eye,
   EyeOff,
@@ -30,7 +31,19 @@ import {
   defaultBookingSeasonAndStartMonday,
   isBookingCalendarSegmentLocallyActive,
   isUsSquashBoxLeagueRosterLocallyEditable,
+  assignableVacantSeasonStartSeats,
+  applyAnchoredBoxSeatsToRoster,
+  buildBoxUiSeatRows,
+  computeBoxSeatByPlayerId,
+  effectiveRelativeRankInBox,
+  isReturningSeasonStartPlayerInBox,
+  OPEN_BOX_SEAT_LABEL,
+  parseRelativeRankOverridesJson,
+  playersInBoxSortedByEffectiveRank,
+  reorderPlayerWithinBoxByCurrentRank,
+  reorderRelativeRankInBox,
   relativeRankInBox,
+  sanitizeSeatOverridesForGroundTruth,
   type BookingCalendarSeason,
 } from "@squash/shared";
 import { api, downloadTextFile } from "./api.js";
@@ -714,6 +727,119 @@ export function HouseleaguePage({
   const [draftSaving, setDraftSaving] = useState(false);
 
   const [liveRosterMutating, setLiveRosterMutating] = useState(false);
+  const [relativeRankOverrides, setRelativeRankOverrides] = useState<
+    Map<number, number>
+  >(new Map());
+  const [rankOverridesSaving, setRankOverridesSaving] = useState(false);
+  const [seasonStartPlayers, setSeasonStartPlayers] = useState<
+    Pick<
+      BoxLeaguePlayer,
+      "id" | "level" | "playerCurrentRank" | "firstName" | "lastName"
+    >[]
+  >([]);
+
+  useEffect(() => {
+    if (!seasonId || isDraftPrep) {
+      setSeasonStartPlayers([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await api<{ players: unknown[] }>(
+          `/api/seasons/${seasonId}/season-start-roster`,
+        );
+        if (cancelled) return;
+        const parsed: typeof seasonStartPlayers = [];
+        for (const raw of res.players ?? []) {
+          if (!raw || typeof raw !== "object") continue;
+          const r = raw as Record<string, unknown>;
+          const id = Number(r.id);
+          const level = Number(r.level);
+          const playerCurrentRank = Number(r.playerCurrentRank);
+          if (
+            !Number.isFinite(id) ||
+            id <= 0 ||
+            !Number.isFinite(level) ||
+            !Number.isFinite(playerCurrentRank)
+          ) {
+            continue;
+          }
+          parsed.push({
+            id,
+            level,
+            playerCurrentRank,
+            firstName: typeof r.firstName === "string" ? r.firstName : "",
+            lastName: typeof r.lastName === "string" ? r.lastName : "",
+          });
+        }
+        setSeasonStartPlayers(parsed);
+      } catch {
+        if (!cancelled) setSeasonStartPlayers([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isDraftPrep, seasonId]);
+
+  useEffect(() => {
+    if (!seasonId || isDraftPrep) {
+      setRelativeRankOverrides(new Map());
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<{ overrides: Record<string, number> }>(
+          `/api/seasons/${seasonId}/house-league/relative-rank-overrides`,
+        );
+        if (cancelled) return;
+        setRelativeRankOverrides(
+          parseRelativeRankOverridesJson(JSON.stringify(res.overrides ?? {})),
+        );
+      } catch {
+        if (!cancelled) setRelativeRankOverrides(new Map());
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isDraftPrep, seasonId]);
+
+  const persistRelativeRankOverrides = useCallback(
+    async (next: Map<number, number>) => {
+      if (!seasonId) return;
+      setRankOverridesSaving(true);
+      setPlayerMoveError(null);
+      try {
+        const res = await api<{ overrides: Record<string, number> }>(
+          `/api/seasons/${seasonId}/house-league/relative-rank-overrides?seasonId=${encodeURIComponent(
+            seasonId,
+          )}`,
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              overrides: Object.fromEntries(
+                [...next.entries()].map(([id, rr]) => [String(id), rr]),
+              ),
+            }),
+          },
+        );
+        setRelativeRankOverrides(
+          parseRelativeRankOverridesJson(JSON.stringify(res.overrides ?? {})),
+        );
+        setRosterDirty(true);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        error(msg);
+        setPlayerMoveError(msg);
+      } finally {
+        setRankOverridesSaving(false);
+      }
+    },
+    [error, seasonId],
+  );
 
   const [clubMembers, setClubMembers] = useState<ClubMember[]>([]);
 
@@ -957,7 +1083,64 @@ export function HouseleaguePage({
     };
   }, [fetchHubEventPlayers, isDraftPrep, prevSeasonEventId, selectedEventId]);
 
-  const displayPlayers = isDraftPrep ? draftPlayers : players;
+  const effectiveSeatOverrides = useMemo(
+    () =>
+      sanitizeSeatOverridesForGroundTruth(
+        isDraftPrep ? draftPlayers : players,
+        seasonStartPlayers,
+        relativeRankOverrides,
+      ),
+    [draftPlayers, isDraftPrep, players, relativeRankOverrides, seasonStartPlayers],
+  );
+
+  useEffect(() => {
+    if (
+      isDraftPrep ||
+      !seasonId ||
+      playersLoading ||
+      rankOverridesSaving ||
+      players.length === 0 ||
+      seasonStartPlayers.length === 0
+    ) {
+      return;
+    }
+    const same =
+      relativeRankOverrides.size === effectiveSeatOverrides.size &&
+      [...relativeRankOverrides.entries()].every(
+        ([id, seat]) => effectiveSeatOverrides.get(id) === seat,
+      );
+    if (same) return;
+    void persistRelativeRankOverrides(effectiveSeatOverrides);
+  }, [
+    effectiveSeatOverrides,
+    isDraftPrep,
+    persistRelativeRankOverrides,
+    players.length,
+    playersLoading,
+    rankOverridesSaving,
+    relativeRankOverrides,
+    seasonId,
+    seasonStartPlayers.length,
+  ]);
+
+  const displayPlayers = useMemo(() => {
+    const raw = isDraftPrep ? draftPlayers : players;
+    if (isDraftPrep) return raw;
+    if (seasonStartPlayers.length > 0 || effectiveSeatOverrides.size > 0) {
+      return applyAnchoredBoxSeatsToRoster(
+        raw,
+        seasonStartPlayers.length > 0 ? seasonStartPlayers : undefined,
+        effectiveSeatOverrides,
+      );
+    }
+    return raw;
+  }, [
+    draftPlayers,
+    effectiveSeatOverrides,
+    isDraftPrep,
+    players,
+    seasonStartPlayers,
+  ]);
 
   const playerIdSetsForList = useMemo(() => {
     const currentIds = new Set(
@@ -1162,26 +1345,130 @@ export function HouseleaguePage({
     [displayPlayers],
   );
 
-  const grouped = useMemo(
-    () => groupPlayersByBox(displayPlayers),
-    [displayPlayers],
-  );
-
   const relativeRankByPlayerId = useMemo(() => {
     const map = new Map<number, number>();
+    const raw = isDraftPrep ? draftPlayers : players;
+    const gt =
+      !isDraftPrep && seasonStartPlayers.length > 0
+        ? seasonStartPlayers
+        : undefined;
     for (const p of displayPlayers) {
-      if (
-        typeof p.level !== "number" ||
-        !Number.isFinite(p.level) ||
-        typeof p.playerCurrentRank !== "number" ||
-        !Number.isFinite(p.playerCurrentRank)
-      ) {
+      if (typeof p.level !== "number" || !Number.isFinite(p.level)) continue;
+      if (gt) {
+        const seat = computeBoxSeatByPlayerId(
+          p.level,
+          raw,
+          gt,
+          effectiveSeatOverrides,
+        ).get(p.id);
+        if (seat != null) map.set(p.id, seat);
         continue;
       }
-      map.set(p.id, relativeRankInBox(p.playerCurrentRank, p.level, displayPlayers));
+      const rr =
+        !isDraftPrep && effectiveSeatOverrides.size > 0
+          ? effectiveRelativeRankInBox(p, raw, effectiveSeatOverrides, gt)
+          : typeof p.playerCurrentRank === "number" &&
+              Number.isFinite(p.playerCurrentRank)
+            ? relativeRankInBox(p.playerCurrentRank, p.level, displayPlayers)
+            : null;
+      if (rr != null) map.set(p.id, rr);
     }
     return map;
-  }, [displayPlayers]);
+  }, [
+    displayPlayers,
+    draftPlayers,
+    isDraftPrep,
+    players,
+    effectiveSeatOverrides,
+    seasonStartPlayers,
+  ]);
+
+  const grouped = useMemo(() => {
+    const base = groupPlayersByBox(displayPlayers);
+    const rosterForSeats = isDraftPrep ? draftPlayers : players;
+    const gt =
+      !isDraftPrep && seasonStartPlayers.length > 0
+        ? seasonStartPlayers
+        : undefined;
+
+    return base.map((group) => {
+      if (!Number.isFinite(group.sortKey) || group.sortKey <= 0) {
+        return {
+          ...group,
+          uiRows: group.players.map((p) => ({
+            seat: relativeRankByPlayerId.get(p.id) ?? 0,
+            player: p,
+            open: false as const,
+          })),
+        };
+      }
+
+      if (gt) {
+        const seatRows = buildBoxUiSeatRows(
+          group.sortKey,
+          rosterForSeats,
+          gt,
+          effectiveSeatOverrides,
+        );
+        const playerById = new Map(displayPlayers.map((p) => [p.id, p]));
+        const uiRows = seatRows.map((row) => ({
+          seat: row.seat,
+          open: row.open,
+          unassigned: row.unassigned,
+          player: row.playerId != null ? playerById.get(row.playerId) : undefined,
+        }));
+        return {
+          ...group,
+          uiRows,
+          players: uiRows
+            .filter((r) => r.player)
+            .map((r) => r.player!),
+        };
+      }
+
+      const sorted =
+        effectiveSeatOverrides.size > 0
+          ? playersInBoxSortedByEffectiveRank(
+              displayPlayers,
+              group.sortKey,
+              effectiveSeatOverrides,
+              gt,
+            )
+          : group.players;
+      return {
+        ...group,
+        players: sorted,
+        uiRows: sorted.map((p) => ({
+          seat: relativeRankByPlayerId.get(p.id) ?? 0,
+          player: p,
+          open: false as const,
+        })),
+      };
+    });
+  }, [
+    displayPlayers,
+    draftPlayers,
+    isDraftPrep,
+    players,
+    relativeRankByPlayerId,
+    effectiveSeatOverrides,
+    seasonStartPlayers.length,
+  ]);
+
+  /** Cumulative `playerCurrentRank` from Club Locker (1…N across the league), before local seat overrides. */
+  const clubLockerRankByPlayerId = useMemo(() => {
+    const raw = isDraftPrep ? draftPlayers : players;
+    const map = new Map<number, number>();
+    for (const p of raw) {
+      if (
+        typeof p.playerCurrentRank === "number" &&
+        Number.isFinite(p.playerCurrentRank)
+      ) {
+        map.set(p.id, p.playerCurrentRank);
+      }
+    }
+    return map;
+  }, [draftPlayers, isDraftPrep, players]);
 
   const boxesDataLoading = isDraftPrep
     ? draftLoading
@@ -1423,7 +1710,13 @@ export function HouseleaguePage({
           },
         );
         await loadPlayers(selectedEventId);
-        setRosterDirty(true);
+        if (relativeRankOverrides.has(playerId)) {
+          const pruned = new Map(relativeRankOverrides);
+          pruned.delete(playerId);
+          await persistRelativeRankOverrides(pruned);
+        } else {
+          setRosterDirty(true);
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         error(msg);
@@ -1436,6 +1729,8 @@ export function HouseleaguePage({
       canEditLiveHouseLeagueRoster,
       error,
       loadPlayers,
+      persistRelativeRankOverrides,
+      relativeRankOverrides,
       seasonId,
       selectedEventId,
     ],
@@ -1474,7 +1769,13 @@ export function HouseleaguePage({
           },
         );
         await loadPlayers(selectedEventId);
-        setRosterDirty(true);
+        if (relativeRankOverrides.has(playerId)) {
+          const pruned = new Map(relativeRankOverrides);
+          pruned.delete(playerId);
+          await persistRelativeRankOverrides(pruned);
+        } else {
+          setRosterDirty(true);
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setPlayerMoveError(msg);
@@ -1488,8 +1789,47 @@ export function HouseleaguePage({
       isDraftPrep,
       loadPlayers,
       persistDraftRoster,
+      persistRelativeRankOverrides,
+      relativeRankOverrides,
       seasonId,
       selectedEventId,
+    ],
+  );
+
+  const reorderPlayerInBox = useCallback(
+    async (playerId: number, direction: "up" | "down") => {
+      if (isDraftPrep) {
+        const next = reorderPlayerWithinBoxByCurrentRank(
+          draftPlayers,
+          playerId,
+          direction,
+        );
+        if (!next) return;
+        await persistDraftRoster(next);
+        return;
+      }
+
+      if (!canEditLiveHouseLeagueRoster || !seasonId) return;
+      const nextOverrides = reorderRelativeRankInBox(
+        players,
+        effectiveSeatOverrides,
+        playerId,
+        direction,
+        seasonStartPlayers.length > 0 ? seasonStartPlayers : undefined,
+      );
+      if (!nextOverrides) return;
+      await persistRelativeRankOverrides(nextOverrides);
+    },
+    [
+      canEditLiveHouseLeagueRoster,
+      draftPlayers,
+      isDraftPrep,
+      persistDraftRoster,
+      persistRelativeRankOverrides,
+      players,
+      effectiveSeatOverrides,
+      seasonId,
+      seasonStartPlayers,
     ],
   );
 
@@ -1793,6 +2133,7 @@ export function HouseleaguePage({
             {grouped.map((group) => {
               const droppable =
                 rosterWritesEnabled && Number.isFinite(group.sortKey);
+              const canReorderInBox = droppable && group.sortKey > 0;
               const dropHover =
                 droppable && dropTargetLevel === group.sortKey;
               return (
@@ -1887,18 +2228,117 @@ export function HouseleaguePage({
                         <th scope="col">Rating</th>
                         <th scope="col">W–L</th>
                         <th scope="col">Pts</th>
-                        <th scope="col" title="Relative rank within box (seat 1–6)">
+                        <th
+                          scope="col"
+                          className="houseleague-table-col--rank"
+                          title="Club Locker cumulative rank (1 through N across the league)"
+                        >
+                          CL
+                        </th>
+                        <th
+                          scope="col"
+                          className="houseleague-table-col--rank"
+                          title={
+                            seasonStartPlayers.length > 0 && !isDraftPrep
+                              ? "Season-start seat (1–6); vacant slots stay open"
+                              : "Relative rank within box (seat 1–6)"
+                          }
+                        >
                           RR
                         </th>
+                        {canReorderInBox ? (
+                          <th scope="col" className="season-start-order-col">
+                            Order
+                          </th>
+                        ) : null}
                         {rosterWritesEnabled ? <th scope="col" /> : null}
                       </tr>
                     </thead>
                     <tbody>
-                      {group.players.map((p) => (
+                      {(group.uiRows ?? group.players.map((p) => ({
+                        seat: relativeRankByPlayerId.get(p.id) ?? 0,
+                        player: p,
+                        open: false as const,
+                      }))).map((row) => {
+                        if (row.open || !row.player) {
+                          return (
+                            <tr
+                              key={`open-${group.sortKey}-${row.seat}`}
+                              className="houseleague-player-row houseleague-player-row--open-slot"
+                            >
+                              <td className="houseleague-name houseleague-name--open">
+                                {OPEN_BOX_SEAT_LABEL}
+                              </td>
+                              <td>—</td>
+                              <td>—</td>
+                              <td>—</td>
+                              <td className="houseleague-table-col--rank">—</td>
+                              <td className="houseleague-table-col--rank">
+                                {row.seat}
+                              </td>
+                              {canReorderInBox ? (
+                                <td className="season-start-order-col" />
+                              ) : null}
+                              {rosterWritesEnabled ? <td /> : null}
+                            </tr>
+                          );
+                        }
+
+                        const p = row.player;
+                        const seat = row.seat;
+                        const isUnassigned = Boolean(
+                          "unassigned" in row && row.unassigned,
+                        );
+                        const gtAnchored =
+                          !isDraftPrep &&
+                          seasonStartPlayers.length > 0 &&
+                          Number.isFinite(group.sortKey) &&
+                          group.sortKey > 0;
+                        const returningGt =
+                          gtAnchored &&
+                          isReturningSeasonStartPlayerInBox(
+                            p.id,
+                            group.sortKey,
+                            seasonStartPlayers,
+                          );
+                        let disableMoveUp =
+                          isDraftPrep || returningGt
+                            ? seat <= 1
+                            : seat <= 1;
+                        let disableMoveDown =
+                          isDraftPrep || returningGt
+                            ? seat >= 6
+                            : seat >= 6;
+                        if (gtAnchored && !returningGt && !isDraftPrep) {
+                          const vacant = assignableVacantSeasonStartSeats(
+                            group.sortKey,
+                            players,
+                            seasonStartPlayers,
+                            effectiveSeatOverrides,
+                          );
+                          const assignedSeat =
+                            effectiveSeatOverrides.get(p.id) ?? null;
+                          if (isUnassigned || assignedSeat == null) {
+                            disableMoveUp = vacant.length === 0;
+                            disableMoveDown = true;
+                          } else {
+                            disableMoveUp = !vacant.some(
+                              (s) => s < assignedSeat,
+                            );
+                            disableMoveDown = false;
+                          }
+                        } else if (returningGt) {
+                          disableMoveUp = true;
+                          disableMoveDown = true;
+                        }
+                        return (
                         <tr
-                          key={p.id}
+                          key={isUnassigned ? `unassigned-${p.id}` : p.id}
                           className={[
                             "houseleague-player-row",
+                            isUnassigned
+                              ? "houseleague-player-row--unassigned"
+                              : "",
                             draggingPlayerId === p.id
                               ? "houseleague-player-row--dragging"
                               : "",
@@ -1911,6 +2351,7 @@ export function HouseleaguePage({
                           draggable={
                             rosterWritesEnabled &&
                             Boolean(seasonId) &&
+                            !rankOverridesSaving &&
                             (isDraftPrep
                               ? !draftLoading && !draftSaving
                               : Boolean(selectedEventId) &&
@@ -1949,7 +2390,88 @@ export function HouseleaguePage({
                             {p.winsSeason}-{p.lossesSeason}
                           </td>
                           <td>{p.pointsSeason}</td>
-                          <td>{relativeRankByPlayerId.get(p.id) ?? "—"}</td>
+                          <td className="houseleague-table-col--rank">
+                            {clubLockerRankByPlayerId.get(p.id) ?? "—"}
+                          </td>
+                          <td className="houseleague-table-col--rank">
+                            {isUnassigned
+                              ? "—"
+                              : seat || (relativeRankByPlayerId.get(p.id) ?? "—")}
+                          </td>
+                          {canReorderInBox ? (
+                            <td className="season-start-order-col">
+                              <div
+                                className="season-start-player-order-btns"
+                                role="group"
+                                aria-label={`Reorder ${p.firstName.trim()} ${p.lastName.trim()}`}
+                              >
+                                <button
+                                  type="button"
+                                  className="secondary season-start-order-btn"
+                                  title={
+                                    gtAnchored && !returningGt && isUnassigned
+                                      ? "Assign to lowest open season-start seat"
+                                      : "Move up in box"
+                                  }
+                                  aria-label={`Move ${p.firstName.trim()} ${p.lastName.trim()} up`}
+                                  disabled={
+                                    isDraftPrep
+                                      ? draftSaving ||
+                                        draftLoading ||
+                                        disableMoveUp
+                                      : playersLoading ||
+                                        liveRosterMutating ||
+                                        moveInFlight ||
+                                        rankOverridesSaving ||
+                                        disableMoveUp
+                                  }
+                                  onClick={() =>
+                                    reorderPlayerInBox(p.id, "up").catch(
+                                      () => {},
+                                    )
+                                  }
+                                >
+                                  <ChevronUp
+                                    size={16}
+                                    strokeWidth={2}
+                                    aria-hidden
+                                  />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary season-start-order-btn"
+                                  title={
+                                    gtAnchored && !returningGt && !isUnassigned
+                                      ? "Move to next open season-start seat or unassign"
+                                      : "Move down in box"
+                                  }
+                                  aria-label={`Move ${p.firstName.trim()} ${p.lastName.trim()} down`}
+                                  disabled={
+                                    isDraftPrep
+                                      ? draftSaving ||
+                                        draftLoading ||
+                                        disableMoveDown
+                                      : playersLoading ||
+                                        liveRosterMutating ||
+                                        moveInFlight ||
+                                        rankOverridesSaving ||
+                                        disableMoveDown
+                                  }
+                                  onClick={() =>
+                                    reorderPlayerInBox(p.id, "down").catch(
+                                      () => {},
+                                    )
+                                  }
+                                >
+                                  <ChevronDown
+                                    size={16}
+                                    strokeWidth={2}
+                                    aria-hidden
+                                  />
+                                </button>
+                              </div>
+                            </td>
+                          ) : null}
                           {rosterWritesEnabled ? (
                             <td>
                               <button
@@ -1962,7 +2484,8 @@ export function HouseleaguePage({
                                     ? draftSaving || draftLoading
                                     : playersLoading ||
                                       liveRosterMutating ||
-                                      moveInFlight
+                                      moveInFlight ||
+                                      rankOverridesSaving
                                 }
                                 onClick={() => {
                                   const displayName =
@@ -1990,7 +2513,8 @@ export function HouseleaguePage({
                             </td>
                           ) : null}
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

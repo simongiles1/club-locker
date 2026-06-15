@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBoxScheduleSeatPlayers,
+  buildBoxUiSeatRows,
   displaySeatByPlayerIdInBox,
   isScheduleSeatVacantInBox,
   livePlayerAtScheduleSeat,
@@ -42,6 +43,45 @@ describe("boxRelativeRank", () => {
     expect(relativeRankInBox(13, 3, roster)).toBe(1);
   });
 
+  it("keeps season-start seats when top box players leave", () => {
+    const withIds: BoxRelativeRankIdentifiedPlayer[] = [
+      ...[7, 8, 9, 10, 11, 12].map((r, i) => ({
+        id: 200 + i,
+        level: 2,
+        playerCurrentRank: r,
+      })),
+    ];
+    const live = withIds.filter((p) => p.id !== 200 && p.id !== 201);
+    const rows = buildBoxUiSeatRows(2, live, withIds);
+    expect(rows.filter((r) => r.open).map((r) => r.seat)).toEqual([1, 2]);
+    expect(rows.find((r) => r.playerId === 202)?.seat).toBe(3);
+    expect(rows.find((r) => r.playerId === 205)?.seat).toBe(6);
+    const seats = displaySeatByPlayerIdInBox({
+      boxNumber: 2,
+      roster: live,
+      groundTruthRoster: withIds,
+    });
+    expect(seats.get(202)).toBe(3);
+    expect(seats.get(205)).toBe(6);
+  });
+
+  it("lists new box players as unassigned until placed in a vacated seat", () => {
+    const withIds: BoxRelativeRankIdentifiedPlayer[] = [
+      ...[7, 8, 9, 10, 11, 12].map((r, i) => ({
+        id: 200 + i,
+        level: 2,
+        playerCurrentRank: r,
+      })),
+    ];
+    const live = [
+      ...withIds.filter((p) => p.id !== 200 && p.id !== 201),
+      { id: 999, level: 2, playerCurrentRank: 13 },
+    ];
+    const rows = buildBoxUiSeatRows(2, live, withIds);
+    expect(rows.filter((r) => r.open).map((r) => r.seat)).toEqual([1, 2]);
+    expect(rows.find((r) => r.playerId === 999)?.unassigned).toBe(true);
+  });
+
   it("maps box 3 seats to names by relative rank", () => {
     const byRr = playerNamesByRelativeRankInBox(roster, 3);
     expect(byRr.get(1)).toBe("B3 P1");
@@ -75,6 +115,44 @@ describe("boxRelativeRank", () => {
     expect(seats.find((s) => s.seat === 2)?.displayName).toBe(OPEN_BOX_SEAT_LABEL);
     expect(seats.find((s) => s.seat === 6)?.displayName).not.toBe(OPEN_BOX_SEAT_LABEL);
     expect(seats.filter((s) => s.displayName === OPEN_BOX_SEAT_LABEL)).toHaveLength(1);
+  });
+
+  it("buildBoxScheduleSeatPlayers respects director seat override for new player", () => {
+    const gt = [7, 8, 9, 10, 11, 12].map((r, i) => ({
+      id: 200 + i,
+      level: 2,
+      playerCurrentRank: r,
+    }));
+    const samId = 999;
+    const live = [
+      ...gt.filter((p) => p.id !== 200 && p.id !== 201),
+      { id: samId, level: 2, playerCurrentRank: 13 },
+    ];
+    const displayName = (p: (typeof live)[number]) =>
+      p.id === samId ? "Sam Habib" : `Player ${p.id}`;
+
+    const withoutOverride = buildBoxScheduleSeatPlayers({
+      boxNumber: 2,
+      roster: live,
+      groundTruthRoster: gt,
+      displayName,
+    });
+    expect(withoutOverride.find((s) => s.seat === 1)?.displayName).toBe("Sam Habib");
+    expect(withoutOverride.find((s) => s.seat === 2)?.displayName).toBe(
+      OPEN_BOX_SEAT_LABEL,
+    );
+
+    const withOverride = buildBoxScheduleSeatPlayers({
+      boxNumber: 2,
+      roster: live,
+      groundTruthRoster: gt,
+      displayName,
+      seatOverrides: new Map([[samId, 2]]),
+    });
+    expect(withOverride.find((s) => s.seat === 1)?.displayName).toBe(
+      OPEN_BOX_SEAT_LABEL,
+    );
+    expect(withOverride.find((s) => s.seat === 2)?.displayName).toBe("Sam Habib");
   });
 
   it("buildBoxScheduleSeatPlayers fills vacated seat with new player before trailing open", () => {

@@ -7,6 +7,7 @@ import {
   scheduleMatchPairNeedsCourtBooking,
   REGULAR_SEASON_GRID_WEEKS,
   type BoxRelativeRankIdentifiedPlayer,
+  type BoxSeatOverrides,
 } from "@squash/shared";
 import type { CreateMatchReservationBody } from "./clubLockerClient.js";
 import { formatReservationSlot } from "./slotMap.js";
@@ -24,12 +25,14 @@ function livePlayerAtSeat(
   seat: number,
   roster: readonly LiveBoxLeaguePlayer[],
   groundTruthRoster?: readonly BoxRelativeRankIdentifiedPlayer[],
+  seatOverrides?: BoxSeatOverrides,
 ): LiveBoxLeaguePlayer | null {
   return livePlayerAtScheduleSeat(
     boxNumber,
     seat,
     roster,
     groundTruthRoster,
+    seatOverrides,
   ) as LiveBoxLeaguePlayer | null;
 }
 
@@ -131,6 +134,7 @@ export function buildLiveWeekPlan(
   court2Id: number,
   customMatchType: number,
   groundTruthRoster?: readonly BoxRelativeRankIdentifiedPlayer[],
+  seatOverrides?: BoxSeatOverrides,
 ): BuildLiveWeekPlanResult {
   if (week < 1 || week > REGULAR_SEASON_GRID_WEEKS) {
     return {
@@ -167,12 +171,14 @@ export function buildLiveWeekPlan(
             a,
             roster,
             groundTruthRoster,
+            seatOverrides,
           );
           const pb = livePlayerAtSeat(
             boxNumber,
             b,
             roster,
             groundTruthRoster,
+            seatOverrides,
           );
           return [
             pa ? auditPlayerRef(pa) : undefined,
@@ -213,6 +219,7 @@ export function buildLiveWeekPlan(
             seatPair,
             roster,
             groundTruthRoster,
+            seatOverrides,
           )
         ) {
           continue;
@@ -222,12 +229,14 @@ export function buildLiveWeekPlan(
           seatPair[0],
           roster,
           groundTruthRoster,
+          seatOverrides,
         );
         const p2 = livePlayerAtSeat(
           boxNumber,
           seatPair[1],
           roster,
           groundTruthRoster,
+          seatOverrides,
         );
         if (!p1 || !p2) {
           issues.push({

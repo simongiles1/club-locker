@@ -40,6 +40,7 @@ import {
   parseSeasonStartRosterPlayers,
   toSeasonStartDiffPlayers,
 } from "./seasonStartRoster.js";
+import { sanitizeRelativeRankOverridesForLiveSeason } from "./relativeRankOverrides.js";
 
 export type BoxEmlPreviewRow = {
   boxNumber: number;
@@ -108,12 +109,14 @@ function seatPlayersForBox(
   boxNumber: number,
   roster: readonly LiveBoxLeaguePlayer[],
   groundTruthRoster?: readonly BoxRelativeRankIdentifiedPlayer[],
+  seatOverrides?: ReadonlyMap<number, number>,
 ): BoxScheduleSeatPlayer[] {
   return buildBoxScheduleSeatPlayers({
     boxNumber,
     roster,
     displayName: (p) => livePlayerDisplayName(p as LiveBoxLeaguePlayer),
     groundTruthRoster,
+    seatOverrides,
   });
 }
 
@@ -229,6 +232,12 @@ export async function buildHouseLeagueBoxEmlBundle(
     return { error: "US Squash box league roster is empty." };
   }
 
+  const seatOverrides = sanitizeRelativeRankOverridesForLiveSeason(
+    db,
+    seasonId,
+    roster,
+  );
+
   const { status: membersStatus, data: membersData } =
     await ussquash.listClubMembers(config.US_SQUASH_CLUB_ID);
   if (membersStatus < 200 || membersStatus >= 300) {
@@ -284,6 +293,7 @@ export async function buildHouseLeagueBoxEmlBundle(
       boxNumber,
       roster,
       groundTruthRoster,
+      seatOverrides,
     );
     if (seatPlayers.length === 0) {
       warnings.push(`Box ${boxNumber}: no roster players found.`);

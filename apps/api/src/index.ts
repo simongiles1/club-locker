@@ -18,6 +18,8 @@ import {
   rankBoxStandings,
   playoffSemis,
   topFourForPlayoffs,
+  parseRelativeRankOverridesJson,
+  pruneRelativeRankOverrides,
 } from "@squash/shared";
 import { loadConfig } from "./config.js";
 import { createDb } from "./db/client.js";
@@ -77,6 +79,7 @@ import {
 import {
   createUssquashClient,
   normalizeJsonArray,
+  pingClubLockerAuth,
 } from "./booking/clubLockerClient.js";
 import { runSingleCourtMatchBooking } from "./booking/singleCourtMatch.js";
 import { registerChampionshipRoutes } from "./championships/routes.js";
@@ -132,6 +135,12 @@ import {
   parseSeasonStartRosterPlayers,
   seedSeasonStartRosterFromLive,
 } from "./houseLeague/seasonStartRoster.js";
+import {
+  loadRelativeRankOverridesForSeason,
+  saveRelativeRankOverridesForSeason,
+  sanitizeRelativeRankOverridesForLiveSeason,
+} from "./houseLeague/relativeRankOverrides.js";
+import { normalizeLiveBoxLeaguePlayers } from "./booking/liveWeekPlan.js";
 import {
   getHouseLeagueWeeklyBoxEmailSettings,
   patchHouseLeagueWeeklyBoxEmailSettings,
@@ -550,6 +559,22 @@ app.get("/api/us-squash-status", async () => ({
   bearerConfigured: Boolean(config.US_SQUASH_BEARER_TOKEN),
   sessionCookieConfigured: Boolean(config.US_SQUASH_SESSION_COOKIE),
 }));
+
+/** Minimal Club Locker credential probe for the web UI (no upstream payload returned). */
+app.get("/api/club-locker-health", async (_req, reply) => {
+  const result = await pingClubLockerAuth(config);
+  if (result.ok) {
+    return { ok: true as const };
+  }
+  const message =
+    result.reason === "missing_token"
+      ? "US_SQUASH_BEARER_TOKEN is not configured on the server."
+      : result.reason === "unauthorized"
+        ? "Club Locker rejected the bearer token — update US_SQUASH_BEARER_TOKEN (and US_SQUASH_SESSION_COOKIE if required) in the server environment."
+        : "Could not reach Club Locker with the current credentials.";
+  const code = result.reason === "missing_token" ? 503 : 502;
+  return reply.code(code).send({ ok: false as const, message });
+});
 
 const singleCourtMatchBody = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -1311,6 +1336,100 @@ app.get(
       return reply.code(400).send({ error: result.error });
     }
     return result;
+  },
+);
+
+const relativeRankOverridesPutBody = z.object({
+  overrides: z.record(z.string(), z.number().int().min(1).max(6)),
+});
+
+app.get(
+  "/api/seasons/:seasonId/house-league/relative-rank-overrides",
+  async (req, reply) => {
+    const { seasonId } = req.params as { seasonId: string };
+    const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+    if (!row) return reply.code(404).send({ error: "season_not_found" });
+    let overrides = loadRelativeRankOverridesForSeason(db, seasonId);
+    const eventId = row.houseLeagueEventId;
+    if (eventId != null && eventId > 0) {
+      const client = createUssquashClient(config);
+      const { status, data } = await client.listBoxLeaguePlayers(eventId);
+      if (status >= 200 && status < 300) {
+        const roster = normalizeLiveBoxLeaguePlayers(data);
+        overrides = sanitizeRelativeRankOverridesForLiveSeason(
+          db,
+          seasonId,
+          roster,
+          overrides,
+        );
+      }
+    }
+    return {
+      overrides: Object.fromEntries(
+        [...overrides.entries()].map(([id, rr]) => [String(id), rr]),
+      ),
+    };
+  },
+);
+
+app.put(
+  "/api/seasons/:seasonId/house-league/relative-rank-overrides",
+  async (req, reply) => {
+    try {
+      const { seasonId } = req.params as { seasonId: string };
+      const row = db.select().from(seasons).where(eq(seasons.id, seasonId)).get();
+      if (!row) return reply.code(404).send({ error: "season_not_found" });
+
+      const eventId = row.houseLeagueEventId;
+      if (
+        eventId != null &&
+        eventId > 0 &&
+        row.status !== "draft" &&
+        (await blockUnlessBookingSeasonAllowsHouseLeagueRosterWrites(
+          reply,
+          req.query,
+          eventId,
+        ))
+      ) {
+        return;
+      }
+
+      const body = relativeRankOverridesPutBody.parse(req.body ?? {});
+      let overrides = parseRelativeRankOverridesJson(
+        JSON.stringify(body.overrides),
+      );
+
+      if (eventId != null && eventId > 0) {
+        const client = createUssquashClient(config);
+        const { status, data } = await client.listBoxLeaguePlayers(eventId);
+        if (status >= 200 && status < 300) {
+          const roster = normalizeLiveBoxLeaguePlayers(data);
+          overrides = sanitizeRelativeRankOverridesForLiveSeason(
+            db,
+            seasonId,
+            roster,
+            overrides,
+          );
+        }
+      }
+
+      saveRelativeRankOverridesForSeason(db, seasonId, overrides);
+      return {
+        ok: true,
+        overrides: Object.fromEntries(
+          [...overrides.entries()].map(([id, rr]) => [String(id), rr]),
+        ),
+      };
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return reply.code(400).send({
+          error: "invalid_body",
+          detail: err.flatten(),
+        });
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(500).send({ error: message });
+    }
   },
 );
 

@@ -50,6 +50,7 @@ import type { StepRuntimeMode } from "../automation/executions.js";
 import { inlineEmlTemplateAssets } from "./boxEmlAssets.js";
 import { resolveSeasonMeta } from "./boxEmlFiles.js";
 import { loadSeasonStartGroundTruthPlayers } from "./seasonStartRoster.js";
+import { sanitizeRelativeRankOverridesForLiveSeason } from "./relativeRankOverrides.js";
 import {
   getHouseLeagueWeeklyBoxEmailSettings,
   getHouseLeagueWeeklyEmailTemplateSettings,
@@ -220,12 +221,14 @@ function seatPlayersForBox(
   boxNumber: number,
   roster: RosterContext["roster"],
   groundTruthRoster?: readonly SeasonStartRosterPlayer[],
+  seatOverrides?: ReadonlyMap<number, number>,
 ): { seat: number; displayName: string }[] {
   return buildBoxScheduleSeatPlayers({
     boxNumber,
     roster,
     displayName: (p) => livePlayerDisplayName(p as LiveBoxLeaguePlayer),
     groundTruthRoster,
+    seatOverrides,
   });
 }
 
@@ -234,12 +237,14 @@ function playerInBoxForSeat(
   seat: number,
   roster: RosterContext["roster"],
   groundTruthRoster?: readonly SeasonStartRosterPlayer[],
+  seatOverrides?: ReadonlyMap<number, number>,
 ): LiveBoxLeaguePlayer | null {
   return livePlayerAtScheduleSeat(
     boxNumber,
     seat,
     roster,
     groundTruthRoster,
+    seatOverrides,
   ) as LiveBoxLeaguePlayer | null;
 }
 
@@ -284,9 +289,22 @@ function bookedMatchForSeatPair(
   playerNameById: Map<string, string>,
   localPlayerIds: Map<number, string>,
   config: AppConfig,
+  seatOverrides?: ReadonlyMap<number, number>,
 ): WeeklyBookedMatchLine | undefined {
-  const p1 = playerInBoxForSeat(boxNumber, pair[0], roster, groundTruthRoster);
-  const p2 = playerInBoxForSeat(boxNumber, pair[1], roster, groundTruthRoster);
+  const p1 = playerInBoxForSeat(
+    boxNumber,
+    pair[0],
+    roster,
+    groundTruthRoster,
+    seatOverrides,
+  );
+  const p2 = playerInBoxForSeat(
+    boxNumber,
+    pair[1],
+    roster,
+    groundTruthRoster,
+    seatOverrides,
+  );
   if (!p1 || !p2) return undefined;
   const local1 = localPlayerIds.get(p1.id);
   const local2 = localPlayerIds.get(p2.id);
@@ -312,12 +330,19 @@ function collectEmailsForSeats(
   roster: RosterContext["roster"],
   emailBySsmId: Map<number, string>,
   groundTruthRoster?: readonly SeasonStartRosterPlayer[],
+  seatOverrides?: ReadonlyMap<number, number>,
 ): { toAddresses: string[]; missingEmailPlayers: string[] } {
   const toAddresses: string[] = [];
   const missingEmailPlayers: string[] = [];
   const seenEmails = new Set<string>();
   for (const seat of seats) {
-    const p = playerInBoxForSeat(boxNumber, seat, roster, groundTruthRoster);
+    const p = playerInBoxForSeat(
+      boxNumber,
+      seat,
+      roster,
+      groundTruthRoster,
+      seatOverrides,
+    );
     if (!p) {
       missingEmailPlayers.push(`Seat ${seat}`);
       continue;
@@ -369,6 +394,7 @@ function bookedMatchesForBox(
   groundTruthRoster: readonly SeasonStartRosterPlayer[] | undefined,
   playerNameById: Map<string, string>,
   localPlayerIds: Map<number, string>,
+  seatOverrides?: ReadonlyMap<number, number>,
 ): WeeklyBookedMatchLine[] {
   const occs = bookedOccurrencesForBox(db, seasonId, weekNumber, boxNumber);
   const mu = getWeekMatchups(weekNumber);
@@ -380,6 +406,7 @@ function bookedMatchesForBox(
         pair,
         roster,
         groundTruthRoster,
+        seatOverrides,
       )
     ) {
       continue;
@@ -393,6 +420,7 @@ function bookedMatchesForBox(
       playerNameById,
       localPlayerIds,
       config,
+      seatOverrides,
     );
     if (line) out.push(line);
   }
@@ -430,6 +458,12 @@ export async function buildWeeklyBoxEmailBundle(
 
   const rosterCtx = await loadRosterContext(db, config, meta.eventId, ussquash);
   if ("error" in rosterCtx) return rosterCtx;
+
+  const seatOverrides = sanitizeRelativeRankOverridesForLiveSeason(
+    db,
+    seasonId,
+    rosterCtx.roster,
+  );
 
   const groundTruthPlayers = loadSeasonStartGroundTruthPlayers(db, seasonId);
   const groundTruthRoster =
@@ -494,6 +528,7 @@ export async function buildWeeklyBoxEmailBundle(
       boxNumber,
       rosterCtx.roster,
       groundTruthRoster,
+      seatOverrides,
     );
 
     const { toAddresses, missingEmailPlayers } = collectBoxEmails(
@@ -517,6 +552,7 @@ export async function buildWeeklyBoxEmailBundle(
         pair,
         rosterCtx.roster,
         groundTruthRoster,
+        seatOverrides,
       ),
     );
 
@@ -541,6 +577,7 @@ export async function buildWeeklyBoxEmailBundle(
           groundTruthRoster,
           rosterCtx.playerNameById,
           localPlayerIds,
+          seatOverrides,
         );
         const missingBooking = matchupsNeedingBooking.some(
           (pair) =>
@@ -553,6 +590,7 @@ export async function buildWeeklyBoxEmailBundle(
               rosterCtx.playerNameById,
               localPlayerIds,
               config,
+              seatOverrides,
             ),
         );
         if (matchupsNeedingBooking.length > 0 && missingBooking) {
@@ -637,6 +675,7 @@ export async function buildWeeklyBoxEmailBundle(
           pair,
           rosterCtx.roster,
           groundTruthRoster,
+          seatOverrides,
         )
       ) {
         continue;
@@ -647,12 +686,14 @@ export async function buildWeeklyBoxEmailBundle(
         pair[0],
         rosterCtx.roster,
         groundTruthRoster,
+        seatOverrides,
       );
       const p2 = playerInBoxForSeat(
         boxNumber,
         pair[1],
         rosterCtx.roster,
         groundTruthRoster,
+        seatOverrides,
       );
       if (!p1 || !p2) {
         continue;
@@ -690,6 +731,7 @@ export async function buildWeeklyBoxEmailBundle(
             rosterCtx.playerNameById,
             localPlayerIds,
             config,
+            seatOverrides,
           )
         : undefined;
 
@@ -723,6 +765,7 @@ export async function buildWeeklyBoxEmailBundle(
           rosterCtx.roster,
           rosterCtx.emailBySsmId,
           groundTruthRoster,
+          seatOverrides,
         );
       if (matchTo.length === 0) {
         warnings.push(`Box ${boxNumber} match ${matchIndex}: no player emails found.`);

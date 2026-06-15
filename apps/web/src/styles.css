@@ -10,6 +10,17 @@
 body {
   margin: 0;
 }
+.app-health-alert {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  width: 100%;
+  font-size: 0.9rem;
+  color: #991b1b;
+  background: #fef2f2;
+  border-bottom: 1px solid #fecaca;
+  padding: 0.5rem 1rem;
+}
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -2448,12 +2459,29 @@ button.secondary.emails-mail-refresh-btn {
 }
 
 .houseleague-box-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 1rem;
 }
 .houseleague-box-card {
+  width: max-content;
+  max-width: 100%;
   margin-bottom: 0;
+}
+.houseleague-box-card .houseleague-table-wrap {
+  overflow-x: visible;
+}
+.houseleague-box-card .houseleague-table {
+  width: max-content;
+}
+.houseleague-box-card .houseleague-table th,
+.houseleague-box-card .houseleague-table td {
+  white-space: nowrap;
+}
+.houseleague-table-col--rank {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .houseleague-player-row {
   cursor: default;
@@ -2565,6 +2593,20 @@ button.secondary.emails-mail-refresh-btn {
 }
 .houseleague-table tbody tr:last-child td {
   border-bottom: none;
+}
+.houseleague-player-row--open-slot td {
+  background-color: #f8fafc;
+  color: #64748b;
+  font-style: italic;
+}
+.houseleague-player-row--open-slot:hover td {
+  background-color: #f1f5f9;
+}
+.houseleague-player-row--unassigned td {
+  background-color: #fffbeb;
+}
+.houseleague-player-row--unassigned:hover td {
+  background-color: #fef3c7;
 }
 .houseleague-name {
   font-weight: 600;

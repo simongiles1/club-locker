@@ -116,6 +116,43 @@ function liveRequestHeaders(config: AppConfig): Headers {
   return h;
 }
 
+export type ClubLockerAuthPingResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: "missing_token" | "unauthorized" | "upstream_error";
+      status?: number;
+    };
+
+/** Minimal live auth probe — single GET, response body discarded. */
+export async function pingClubLockerAuth(
+  config: AppConfig,
+): Promise<ClubLockerAuthPingResult> {
+  if (config.US_SQUASH_MODE === "mock") {
+    return { ok: true };
+  }
+  if (!config.US_SQUASH_BEARER_TOKEN) {
+    return { ok: false, reason: "missing_token" };
+  }
+  const base = config.US_SQUASH_API_BASE.replace(/\/$/, "");
+  const url = `${base}/box_leagues/for_club/${config.US_SQUASH_CLUB_ID}`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: liveRequestHeaders(config),
+      signal: AbortSignal.timeout(10_000),
+    });
+    await res.body?.cancel().catch(() => undefined);
+    if (res.ok) return { ok: true };
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, reason: "unauthorized", status: res.status };
+    }
+    return { ok: false, reason: "upstream_error", status: res.status };
+  } catch {
+    return { ok: false, reason: "upstream_error" };
+  }
+}
+
 const mockClubMembersRow = {
   ssmId: 561_915,
   lastLogin: "2026-04-16T16:24:57.000Z",
