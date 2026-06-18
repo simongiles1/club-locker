@@ -74,6 +74,7 @@ import {
   runBookSlotBothCourtsNoBulkCancel,
   cancelBookingCalendarItems,
   markWeekBookingDisplayLocal,
+  markWeeksBookingDisplayLocal,
   markSlotBookingDisplayLocal,
 } from "./booking/service.js";
 import {
@@ -2771,7 +2772,21 @@ app.post("/api/seasons/:seasonId/booking/mark-week-local", async (req) => {
       display: z.enum(["bulk_held", "converted"]),
     })
     .parse(req.body);
-  return markWeekBookingDisplayLocal(db, { seasonId, ...body });
+  const client = createUssquashClient(config);
+  return markWeekBookingDisplayLocal(db, config, { seasonId, ...body }, client);
+});
+
+app.post("/api/seasons/:seasonId/booking/mark-weeks-local", async (req) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      startMondayDate: z.string().min(1),
+      weeks: z.array(z.coerce.number().int().min(1)).min(1),
+      display: z.enum(["bulk_held", "converted"]),
+    })
+    .parse(req.body);
+  const client = createUssquashClient(config);
+  return markWeeksBookingDisplayLocal(db, config, { seasonId, ...body }, client);
 });
 
 app.post("/api/seasons/:seasonId/booking/mark-slot-local", async (req) => {

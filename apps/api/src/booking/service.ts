@@ -2526,19 +2526,158 @@ function parseLocallyConvertedSlotKeys(raw: string | null | undefined): string[]
   }
 }
 
+function convertRunIdForWeek(
+  db: Db,
+  seasonId: string,
+  week: number,
+): string | null {
+  const row = db
+    .select({ id: bookingRuns.id, status: bookingRuns.status })
+    .from(bookingRuns)
+    .where(
+      and(
+        eq(bookingRuns.seasonId, seasonId),
+        eq(bookingRuns.kind, "convert"),
+        eq(bookingRuns.weekNumber, week),
+      ),
+    )
+    .orderBy(desc(bookingRuns.createdAt))
+    .limit(1)
+    .get();
+  if (!row || row.status === "error") return null;
+  return row.id;
+}
+
+/**
+ * Populate `house_league_booked_occurrences` from the live roster week plan without
+ * calling Club Locker — used when conversion was done elsewhere but this app's DB lags.
+ */
+async function seedLocalBookedOccurrencesForWeek(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    week: number;
+    startMondayDate: string;
+    bookingRunId: string;
+  },
+  client: UssquashClient = createUssquashClient(config),
+): Promise<
+  { ok: true; inserted: number; skipped: number } | { ok: false; error: string }
+> {
+  const rosterResult = await fetchLiveBoxLeagueRosterForSeason(
+    db,
+    config,
+    input.seasonId,
+    client,
+  );
+  if ("error" in rosterResult) {
+    return { ok: false, error: rosterResult.error };
+  }
+
+  const { mondayDate, tuesdayDate } = seasonPlayDates(
+    db,
+    input.startMondayDate,
+    input.week,
+  );
+  const groundTruth = optionalSeasonStartGroundTruth(db, input.seasonId);
+  const seatOverrides = optionalSeatOverrides(db, input.seasonId);
+  const live = buildLiveWeekPlan(
+    input.week,
+    rosterResult.roster,
+    mondayDate,
+    tuesdayDate,
+    config.US_SQUASH_CLUB_ID,
+    config.US_SQUASH_COURT_1_ID,
+    config.US_SQUASH_COURT_2_ID,
+    config.US_SQUASH_CUSTOM_MATCH_TYPE,
+    groundTruth,
+    seatOverrides,
+  );
+  if (!liveWeekPlanResolvable(live)) {
+    const reason =
+      live.issues[0]?.reason ??
+      (live.items.length === 0
+        ? "No managed match reservations to derive from the live roster."
+        : "Could not resolve the live roster for this week.");
+    return { ok: false, error: reason };
+  }
+
+  const rosterById = new Map(rosterResult.roster.map((p) => [p.id, p]));
+  let inserted = 0;
+  let skipped = 0;
+  for (const it of live.items) {
+    const p1 = rosterById.get(it.ussquashPlayerIds[0]);
+    const p2 = rosterById.get(it.ussquashPlayerIds[1]);
+    if (!p1 || !p2) continue;
+    const player1Id = ensurePlayerRowFromUssquash(
+      db,
+      p1.id,
+      it.playerDisplayNames[0],
+      p1.rating,
+    );
+    const player2Id = ensurePlayerRowFromUssquash(
+      db,
+      p2.id,
+      it.playerDisplayNames[1],
+      p2.rating,
+    );
+    try {
+      db.insert(houseLeagueBookedOccurrences)
+        .values({
+          id: crypto.randomUUID(),
+          seasonId: input.seasonId,
+          weekNumber: input.week,
+          playDate: it.playDate,
+          slot: it.slot,
+          courtId: it.courtId,
+          boxNumber: it.boxNumber,
+          player1Id,
+          player2Id,
+          bookingRunId: input.bookingRunId,
+          reservationId: null,
+        })
+        .run();
+      inserted++;
+    } catch {
+      skipped++;
+    }
+  }
+
+  if (inserted === 0 && skipped === 0) {
+    return { ok: false, error: "No booked occurrences could be derived for this week." };
+  }
+
+  return { ok: true, inserted, skipped };
+}
+
+export type MarkWeekBookingDisplayLocalResult =
+  | {
+      ok: true;
+      message: string;
+      holdId: string;
+      occurrencesSeeded?: number;
+      seedWarning?: string;
+    }
+  | { ok: false; error: string };
+
 /**
  * Update season-hold metadata so the booking calendar reflects Club Locker reality
  * without calling Club Locker (green = bulk-held week, purple = converted week).
+ * When marking converted, also seeds booked-occurrence rows from the live roster plan
+ * so weekly emails can run without re-converting in Club Locker.
  */
-export function markWeekBookingDisplayLocal(
+export async function markWeekBookingDisplayLocal(
   db: Db,
+  config: AppConfig,
   input: {
     seasonId: string;
     startMondayDate: string;
     week: number;
     display: MarkWeekLocalDisplay;
   },
-): { ok: true; message: string; holdId: string } | { ok: false; error: string } {
+  client: UssquashClient = createUssquashClient(config),
+): Promise<MarkWeekBookingDisplayLocalResult> {
   const hold = findLatestSeasonHoldRow(db, input.seasonId, input.startMondayDate);
   if (!hold) {
     return {
@@ -2556,6 +2695,7 @@ export function markWeekBookingDisplayLocal(
   let nextConverted: number[];
   let nextLocalSlots: string[];
   let nextStatus: "active" | "fully_converted";
+  let convertRunId: string | null = null;
 
   if (input.display === "bulk_held") {
     nextConverted = converted.filter((w) => w !== input.week);
@@ -2566,10 +2706,12 @@ export function markWeekBookingDisplayLocal(
     nextLocalSlots = localSlots.filter((k) => !k.startsWith(`${input.week}|`));
     nextStatus =
       nextConverted.length >= hold.seasonWeeks ? "fully_converted" : "active";
-    if (!latestConvertRunForWeek(db, input.seasonId, input.week)) {
+    convertRunId = convertRunIdForWeek(db, input.seasonId, input.week);
+    if (!convertRunId) {
+      convertRunId = crypto.randomUUID();
       db.insert(bookingRuns)
         .values({
-          id: crypto.randomUUID(),
+          id: convertRunId,
           seasonId: input.seasonId,
           kind: "convert",
           weekNumber: input.week,
@@ -2600,11 +2742,117 @@ export function markWeekBookingDisplayLocal(
     input.display === "bulk_held"
       ? "bulk-held (green on calendar)"
       : "converted to matches (purple on calendar)";
+  let message = `Week ${input.week} marked as ${label} in this app only. Club Locker was not changed.`;
+  let occurrencesSeeded: number | undefined;
+  let seedWarning: string | undefined;
+
+  if (input.display === "converted" && convertRunId) {
+    const seed = await seedLocalBookedOccurrencesForWeek(
+      db,
+      config,
+      {
+        seasonId: input.seasonId,
+        week: input.week,
+        startMondayDate: input.startMondayDate,
+        bookingRunId: convertRunId,
+      },
+      client,
+    );
+    if (!seed.ok) {
+      seedWarning = seed.error;
+      message += ` Booked occurrences were not seeded: ${seed.error}`;
+    } else if (seed.inserted > 0) {
+      occurrencesSeeded = seed.inserted;
+      message += ` Seeded ${seed.inserted} booked occurrence(s) from the live roster plan.`;
+    } else if (seed.skipped > 0) {
+      message += " Booked occurrences were already present for this week.";
+    }
+  }
+
   return {
     ok: true,
     holdId: hold.id,
-    message: `Week ${input.week} marked as ${label} in this app only. Club Locker was not changed.`,
+    message,
+    ...(occurrencesSeeded != null ? { occurrencesSeeded } : {}),
+    ...(seedWarning ? { seedWarning } : {}),
   };
+}
+
+export type MarkWeeksBookingDisplayLocalResult =
+  | {
+      ok: true;
+      message: string;
+      weeks: Array<
+        { week: number } & MarkWeekBookingDisplayLocalResult
+      >;
+    }
+  | { ok: false; error: string };
+
+/** Mark multiple season weeks locally (no Club Locker booking calls). */
+export async function markWeeksBookingDisplayLocal(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    startMondayDate: string;
+    weeks: number[];
+    display: MarkWeekLocalDisplay;
+  },
+  client: UssquashClient = createUssquashClient(config),
+): Promise<MarkWeeksBookingDisplayLocalResult> {
+  const hold = findLatestSeasonHoldRow(db, input.seasonId, input.startMondayDate);
+  if (!hold) {
+    return {
+      ok: false,
+      error:
+        "No season hold record for this start Monday. Run season block (bulk) once so a hold row exists, then mark locally.",
+    };
+  }
+
+  const uniqueWeeks = [...new Set(input.weeks)]
+    .filter((w) => w >= 1 && w <= hold.seasonWeeks)
+    .sort((a, b) => a - b);
+  if (uniqueWeeks.length === 0) {
+    return {
+      ok: false,
+      error: `Select at least one week between 1 and ${hold.seasonWeeks}.`,
+    };
+  }
+
+  const weeks: Array<{ week: number } & MarkWeekBookingDisplayLocalResult> = [];
+  for (const week of uniqueWeeks) {
+    const result = await markWeekBookingDisplayLocal(
+      db,
+      config,
+      {
+        seasonId: input.seasonId,
+        startMondayDate: input.startMondayDate,
+        week,
+        display: input.display,
+      },
+      client,
+    );
+    weeks.push({ week, ...result });
+  }
+
+  const convertedCount = weeks.filter((w) => w.ok).length;
+  const seededTotal = weeks.reduce(
+    (n, w) => n + (w.ok && w.occurrencesSeeded ? w.occurrencesSeeded : 0),
+    0,
+  );
+  const failed = weeks.filter((w) => !w.ok);
+  let message =
+    input.display === "converted"
+      ? `Marked ${convertedCount} week(s) as converted locally (Club Locker unchanged).`
+      : `Marked ${convertedCount} week(s) as bulk-held locally (Club Locker unchanged).`;
+  if (seededTotal > 0) {
+    message += ` Seeded ${seededTotal} booked occurrence(s) from the live roster plan.`;
+  }
+  if (failed.length > 0) {
+    message += ` ${failed.length} week(s) failed.`;
+  }
+
+  return { ok: true, message, weeks };
 }
 
 /**

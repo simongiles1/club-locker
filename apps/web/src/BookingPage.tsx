@@ -2425,6 +2425,71 @@ export function BookingPage({
     runSeasonWeekConversions,
   ]);
 
+  const submitMarkWeeksLocalModal = useCallback(async () => {
+    if (!seasonId || !startMondayForSeason || !activeSeasonHold) return;
+    const weeksToRun = [...convertWeeksModalSelected]
+      .filter(
+        (w) =>
+          w >= 1 &&
+          w <= activeSeasonHold.seasonWeeks &&
+          isBulkWeekStillHeld(w),
+      )
+      .sort((a, b) => a - b);
+    if (weeksToRun.length === 0) {
+      setConvertFeedback({
+        kind: "error",
+        message: "Select at least one week that is not already marked converted.",
+      });
+      return;
+    }
+    if (
+      !window.confirm(
+        `Mark ${weeksToRun.length} week(s) as converted in this app only?\n\n` +
+          "Club Locker will not be changed. Booked occurrences will be seeded from the live roster plan so weekly emails can run.",
+      )
+    ) {
+      return;
+    }
+    setConvertFeedback(null);
+    setConvertWeekLoading(true);
+    try {
+      const res = await api<
+        | { ok: true; message: string }
+        | { ok: false; error: string }
+      >(`/api/seasons/${seasonId}/booking/mark-weeks-local`, {
+        method: "POST",
+        body: JSON.stringify({
+          startMondayDate: startMondayForSeason,
+          weeks: weeksToRun,
+          display: "converted",
+        }),
+      });
+      if (!res.ok) {
+        setConvertFeedback({ kind: "error", message: res.error });
+        onLog(res.error);
+        return;
+      }
+      onLog(res.message);
+      await refreshLocalSeasonHolds();
+      setConvertFeedback({ kind: "ok", message: res.message });
+      setConvertWeeksModalOpen(false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onLog(msg);
+      setConvertFeedback({ kind: "error", message: msg });
+    } finally {
+      setConvertWeekLoading(false);
+    }
+  }, [
+    seasonId,
+    startMondayForSeason,
+    activeSeasonHold,
+    convertWeeksModalSelected,
+    isBulkWeekStillHeld,
+    onLog,
+    refreshLocalSeasonHolds,
+  ]);
+
   const convertVisibleWeekToMatches = useCallback(async () => {
     if (!activeSeasonHold || !activeSeasonHoldId) return;
     const week = calendarWeekNumber;
@@ -3815,10 +3880,12 @@ export function BookingPage({
               Convert weeks to match bookings
             </h3>
             <p className="weekly-meta" style={{ marginTop: 0 }}>
-              For each week you select, this deletes that week&apos;s bulk block reservations in Club
-              Locker and creates individual match reservations from the live US Squash box league
-              roster (same geometry as the calendar). Weeks already converted are shown for
-              reference only.
+              For each week you select, <strong>Convert selected</strong> deletes that week&apos;s
+              bulk block reservations in Club Locker and creates individual match reservations from
+              the live US Squash box league roster (same geometry as the calendar). Weeks already
+              converted are shown for reference only. If you already converted in Club Locker from
+              another environment, use <strong>Mark selected locally</strong> instead — it updates
+              this app&apos;s database only and seeds booked occurrences for weekly emails.
             </p>
             <ul
               style={{
@@ -3900,6 +3967,20 @@ export function BookingPage({
                 onClick={() => setConvertWeeksModalOpen(false)}
               >
                 Cancel
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                disabled={
+                  convertWeekLoading ||
+                  ![...convertWeeksModalSelected].some((w) => isBulkWeekStillHeld(w))
+                }
+                title="Mark weeks converted in this app only — no Club Locker changes. Seeds booked occurrences for weekly emails."
+                onClick={() => {
+                  void submitMarkWeeksLocalModal();
+                }}
+              >
+                {convertWeekLoading ? "Working…" : "Mark selected locally"}
               </button>
               <button
                 type="button"
