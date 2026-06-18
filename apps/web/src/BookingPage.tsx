@@ -3171,6 +3171,59 @@ export function BookingPage({
                 </label>
               </div>
             </div>
+            {seasonId ? (
+              <div
+                className="booking-local-sync-banner"
+                role="region"
+                aria-label="Local booking database sync"
+                style={{
+                  marginTop: "0.75rem",
+                  padding: "0.65rem 0.75rem",
+                  borderRadius: 8,
+                  border: "1px solid var(--border, #cbd5e1)",
+                  background: "var(--surface-2, #f8fafc)",
+                }}
+              >
+                <p className="weekly-meta" style={{ margin: "0 0 0.5rem" }}>
+                  <strong>Local DB sync (no Club Locker changes)</strong>
+                  {" — "}
+                  {!startMondayForSeason
+                    ? "Set First Monday of season above, then register the hold and mark weeks converted so weekly emails work on this server."
+                    : hasSeasonHoldRegistered
+                      ? "Season hold is registered on this server. Mark converted weeks here when booking was done from local or Club Locker already."
+                      : "This server has no season hold row yet (common when bulk/convert ran from local only). Register once, then mark all converted weeks."}
+                </p>
+                <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
+                  {hasSeasonHoldRegistered && activeSeasonHoldId ? (
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={!startMondayForSeason || convertWeekLoading || !activeSeasonHoldId}
+                      title="Update this app's database only — no Club Locker booking calls."
+                      onClick={openConvertWeeksModal}
+                    >
+                      {convertWeekLoading
+                        ? "Working…"
+                        : "Mark weeks converted locally…"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={!startMondayForSeason || convertWeekLoading}
+                      title="Create the season hold row in this app's database without calling Club Locker."
+                      onClick={() => {
+                        void registerSeasonHoldLocally();
+                      }}
+                    >
+                      {convertWeekLoading
+                        ? "Registering…"
+                        : "Register season hold locally…"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : null}
             {seasonPreviewError ? (
               <p className="weekly-empty" style={{ marginTop: "0.75rem" }}>
                 Preview failed: {seasonPreviewError}
@@ -3353,38 +3406,6 @@ export function BookingPage({
                     </button>
                   ) : null}
                 </>
-              ) : null}
-              {hasSeasonHoldRegistered && activeSeasonHoldId ? (
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!seasonId || convertWeekLoading || !activeSeasonHoldId}
-                  title="Sync converted weeks in this app's database only — no Club Locker booking changes."
-                  onClick={openConvertWeeksModal}
-                >
-                  {convertWeekLoading ? "Working…" : "Mark weeks converted locally…"}
-                </button>
-              ) : seasonId && startMondayForSeason ? (
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!seasonId || convertWeekLoading || !startMondayForSeason}
-                  title="Create the local season hold record without calling Club Locker. Required before you can mark weeks converted locally on this server."
-                  onClick={() => {
-                    void registerSeasonHoldLocally();
-                  }}
-                >
-                  {convertWeekLoading
-                    ? "Registering…"
-                    : "Register season hold locally…"}
-                </button>
-              ) : null}
-              {!hasSeasonHoldRegistered && seasonId && startMondayForSeason ? (
-                <p className="weekly-meta" style={{ margin: "0.35rem 0 0", width: "100%" }}>
-                  No season hold in this server&apos;s database for this start Monday — likely
-                  because bulk booking was run from local only. Register locally first, then mark
-                  weeks converted (Club Locker unchanged).
-                </p>
               ) : null}
               <button
                 type="button"
