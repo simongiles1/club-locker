@@ -75,6 +75,7 @@ import {
   cancelBookingCalendarItems,
   markWeekBookingDisplayLocal,
   markWeeksBookingDisplayLocal,
+  registerSeasonHoldLocal,
   markSlotBookingDisplayLocal,
 } from "./booking/service.js";
 import {
@@ -2761,6 +2762,17 @@ app.post("/api/seasons/:seasonId/booking/rebook-play-day", async (req) => {
     })
     .parse(req.body);
   return runRebookPlayDay(db, config, { seasonId, ...body });
+});
+
+app.post("/api/seasons/:seasonId/booking/register-season-hold-local", async (req) => {
+  const { seasonId } = req.params as { seasonId: string };
+  const body = z
+    .object({
+      startMondayDate: z.string().min(1),
+      seasonWeeks: z.coerce.number().int().min(1).optional(),
+    })
+    .parse(req.body);
+  return registerSeasonHoldLocal(db, config, { seasonId, ...body });
 });
 
 app.post("/api/seasons/:seasonId/booking/mark-week-local", async (req) => {

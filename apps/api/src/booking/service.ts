@@ -2502,6 +2502,66 @@ function findLatestSeasonHoldRow(
     .get();
 }
 
+/**
+ * Create a season hold row in this app's database only — for when bulk/convert was
+ * already done in Club Locker from another environment (e.g. local dev).
+ */
+export function registerSeasonHoldLocal(
+  db: Db,
+  config: AppConfig,
+  input: {
+    seasonId: string;
+    startMondayDate: string;
+    seasonWeeks?: number;
+  },
+):
+  | { ok: true; holdId: string; message: string; alreadyRegistered?: boolean }
+  | { ok: false; error: string } {
+  const existing = findLatestSeasonHoldRow(db, input.seasonId, input.startMondayDate);
+  if (existing && (existing.status === "active" || existing.status === "fully_converted")) {
+    return {
+      ok: true,
+      holdId: existing.id,
+      alreadyRegistered: true,
+      message:
+        "Season hold is already registered for this start Monday. Use “Mark weeks locally” to sync converted weeks.",
+    };
+  }
+
+  const season = db.select().from(seasons).where(eq(seasons.id, input.seasonId)).get();
+  if (!season) {
+    return { ok: false, error: "season_not_found" };
+  }
+
+  const seasonWeeks = input.seasonWeeks ?? config.LEAGUE_SEASON_WEEKS;
+  if (seasonWeeks < 1) {
+    return { ok: false, error: "seasonWeeks must be >= 1" };
+  }
+
+  const holdId = crypto.randomUUID();
+  db.insert(seasonBookingHolds)
+    .values({
+      id: holdId,
+      seasonId: input.seasonId,
+      startMondayDate: input.startMondayDate,
+      seasonWeeks,
+      status: "active",
+      mondayReservationIdsJson: "[]",
+      tuesdayReservationIdsJson: "[]",
+      convertedWeeksJson: "[]",
+      locallyConvertedSlotsJson: "[]",
+      rawBulkResponseJson: JSON.stringify({ localDisplayOnly: true }),
+    })
+    .run();
+
+  return {
+    ok: true,
+    holdId,
+    message:
+      "Registered season hold in this app only. Club Locker was not changed. You can now mark weeks as converted locally.",
+  };
+}
+
 export type MarkWeekLocalDisplay = "bulk_held" | "converted";
 
 export type LocalBookingSlotRef = {

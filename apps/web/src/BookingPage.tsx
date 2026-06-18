@@ -1499,6 +1499,7 @@ export function BookingPage({
   } | null>(null);
   const hasActiveSeasonHoldForConvert =
     activeSeasonHold?.status === "active" && Boolean(activeSeasonHold.id);
+  const hasSeasonHoldRegistered = Boolean(activeSeasonHold?.id);
   const activeSeasonHoldId = activeSeasonHold?.id ?? null;
   const [seasonBulkFeedback, setSeasonBulkFeedback] = useState<{
     kind: "idempotent" | "success" | "cleared" | "error";
@@ -1717,6 +1718,16 @@ export function BookingPage({
     [activeSeasonHold],
   );
 
+  /** Week not yet marked converted in this app's DB (for local sync without Club Locker). */
+  const isWeekPendingLocalConvert = useCallback(
+    (weekNum: number) => {
+      if (!activeSeasonHold) return false;
+      if (weekNum > activeSeasonHold.seasonWeeks) return false;
+      return !activeSeasonHold.convertedWeeks.includes(weekNum);
+    },
+    [activeSeasonHold],
+  );
+
   const visibleWeekCanConvert = Boolean(
     hasActiveSeasonHoldForConvert &&
       activeSeasonHold &&
@@ -1878,10 +1889,10 @@ export function BookingPage({
   }, [convertWeeksModalOpen, convertWeekLoading]);
 
   useEffect(() => {
-    if (convertWeeksModalOpen && !hasActiveSeasonHoldForConvert) {
+    if (convertWeeksModalOpen && !hasSeasonHoldRegistered) {
       setConvertWeeksModalOpen(false);
     }
-  }, [convertWeeksModalOpen, hasActiveSeasonHoldForConvert]);
+  }, [convertWeeksModalOpen, hasSeasonHoldRegistered]);
 
   useEffect(() => {
     if (!singleBookDraft) return;
@@ -2291,19 +2302,19 @@ export function BookingPage({
   );
 
   const openConvertWeeksModal = useCallback(() => {
-    if (!activeSeasonHold || activeSeasonHold.status !== "active") return;
+    if (!activeSeasonHold) return;
     const initial = new Set<number>();
     for (let w = 1; w <= activeSeasonHold.seasonWeeks; w++) {
-      if (isBulkWeekStillHeld(w)) initial.add(w);
+      if (isWeekPendingLocalConvert(w)) initial.add(w);
     }
     setConvertWeeksModalSelected(initial);
     setConvertFeedback(null);
     setConvertWeeksModalOpen(true);
-  }, [activeSeasonHold, isBulkWeekStillHeld]);
+  }, [activeSeasonHold, isWeekPendingLocalConvert]);
 
   const toggleConvertWeeksModalWeek = useCallback(
     (w: number) => {
-      if (!isBulkWeekStillHeld(w)) return;
+      if (!isWeekPendingLocalConvert(w)) return;
       setConvertWeeksModalSelected((prev) => {
         const next = new Set(prev);
         if (next.has(w)) next.delete(w);
@@ -2311,7 +2322,7 @@ export function BookingPage({
         return next;
       });
     },
-    [isBulkWeekStillHeld],
+    [isWeekPendingLocalConvert],
   );
 
   const runSeasonWeekConversions = useCallback(
@@ -2432,7 +2443,7 @@ export function BookingPage({
         (w) =>
           w >= 1 &&
           w <= activeSeasonHold.seasonWeeks &&
-          isBulkWeekStillHeld(w),
+          isWeekPendingLocalConvert(w),
       )
       .sort((a, b) => a - b);
     if (weeksToRun.length === 0) {
@@ -2485,7 +2496,58 @@ export function BookingPage({
     startMondayForSeason,
     activeSeasonHold,
     convertWeeksModalSelected,
-    isBulkWeekStillHeld,
+    isWeekPendingLocalConvert,
+    onLog,
+    refreshLocalSeasonHolds,
+  ]);
+
+  const registerSeasonHoldLocally = useCallback(async () => {
+    if (!seasonId || !startMondayForSeason) {
+      window.alert("Set a season and start Monday first.");
+      return;
+    }
+    if (
+      !window.confirm(
+        "Register a season hold in this app only?\n\nClub Locker will not be changed. Use this when bulk booking and conversion were already done from local (or manually in Club Locker) but production's database was never updated.",
+      )
+    ) {
+      return;
+    }
+    setSeasonBulkFeedback(null);
+    setConvertWeekLoading(true);
+    try {
+      const res = await api<
+        | { ok: true; message: string; holdId: string; alreadyRegistered?: boolean }
+        | { ok: false; error: string }
+      >(`/api/seasons/${seasonId}/booking/register-season-hold-local`, {
+        method: "POST",
+        body: JSON.stringify({
+          startMondayDate: startMondayForSeason,
+          seasonWeeks: weeksToBook,
+        }),
+      });
+      if (!res.ok) {
+        setSeasonBulkFeedback({ kind: "error", message: res.error });
+        onLog(res.error);
+        return;
+      }
+      onLog(res.message);
+      await refreshLocalSeasonHolds();
+      setSeasonBulkFeedback({
+        kind: res.alreadyRegistered ? "idempotent" : "success",
+        message: res.message,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onLog(msg);
+      setSeasonBulkFeedback({ kind: "error", message: msg });
+    } finally {
+      setConvertWeekLoading(false);
+    }
+  }, [
+    seasonId,
+    startMondayForSeason,
+    weeksToBook,
     onLog,
     refreshLocalSeasonHolds,
   ]);
@@ -3290,16 +3352,39 @@ export function BookingPage({
                         : `Re-book Tuesday (${seasonBulkModalWeekLabel(calendarWeekNumber)})`}
                     </button>
                   ) : null}
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={!seasonId || convertWeekLoading || !activeSeasonHoldId}
-                    title="Choose which season weeks to convert from bulk clinics to individual match bookings."
-                    onClick={openConvertWeeksModal}
-                  >
-                    {convertWeekLoading ? "Converting weeks…" : "Convert weeks to matches…"}
-                  </button>
                 </>
+              ) : null}
+              {hasSeasonHoldRegistered && activeSeasonHoldId ? (
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!seasonId || convertWeekLoading || !activeSeasonHoldId}
+                  title="Sync converted weeks in this app's database only — no Club Locker booking changes."
+                  onClick={openConvertWeeksModal}
+                >
+                  {convertWeekLoading ? "Working…" : "Mark weeks converted locally…"}
+                </button>
+              ) : seasonId && startMondayForSeason ? (
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!seasonId || convertWeekLoading || !startMondayForSeason}
+                  title="Create the local season hold record without calling Club Locker. Required before you can mark weeks converted locally on this server."
+                  onClick={() => {
+                    void registerSeasonHoldLocally();
+                  }}
+                >
+                  {convertWeekLoading
+                    ? "Registering…"
+                    : "Register season hold locally…"}
+                </button>
+              ) : null}
+              {!hasSeasonHoldRegistered && seasonId && startMondayForSeason ? (
+                <p className="weekly-meta" style={{ margin: "0.35rem 0 0", width: "100%" }}>
+                  No season hold in this server&apos;s database for this start Monday — likely
+                  because bulk booking was run from local only. Register locally first, then mark
+                  weeks converted (Club Locker unchanged).
+                </p>
               ) : null}
               <button
                 type="button"
@@ -3877,15 +3962,18 @@ export function BookingPage({
             style={{ maxWidth: "28rem" }}
           >
             <h3 id="booking-convert-weeks-title" style={{ marginTop: 0 }}>
-              Convert weeks to match bookings
+              Mark weeks converted locally
             </h3>
             <p className="weekly-meta" style={{ marginTop: 0 }}>
-              For each week you select, <strong>Convert selected</strong> deletes that week&apos;s
-              bulk block reservations in Club Locker and creates individual match reservations from
-              the live US Squash box league roster (same geometry as the calendar). Weeks already
-              converted are shown for reference only. If you already converted in Club Locker from
-              another environment, use <strong>Mark selected locally</strong> instead — it updates
-              this app&apos;s database only and seeds booked occurrences for weekly emails.
+              <strong>Mark selected locally</strong> updates this app&apos;s database only and
+              seeds booked occurrences for weekly emails. Club Locker is not changed.{" "}
+              {hasActiveSeasonHoldForConvert ? (
+                <>
+                  <strong>Convert selected</strong> (only when weeks still have bulk holds here)
+                  deletes bulk clinics in Club Locker and creates match reservations — do not use
+                  that if you already converted from local.
+                </>
+              ) : null}
             </p>
             <ul
               style={{
@@ -3898,8 +3986,9 @@ export function BookingPage({
             >
               {Array.from({ length: activeSeasonHold.seasonWeeks }, (_, i) => i + 1).map((w) => {
                 const converted = activeSeasonHold.convertedWeeks.includes(w);
+                const pendingLocal = isWeekPendingLocalConvert(w);
                 const stillHeld = isBulkWeekStillHeld(w);
-                const checked = stillHeld && convertWeeksModalSelected.has(w);
+                const checked = pendingLocal && convertWeeksModalSelected.has(w);
                 return (
                   <li
                     key={w}
@@ -3916,7 +4005,7 @@ export function BookingPage({
                       id={`convert-week-${w}`}
                       type="checkbox"
                       checked={checked}
-                      disabled={converted || !stillHeld || convertWeekLoading}
+                      disabled={converted || !pendingLocal || convertWeekLoading}
                       onChange={() => toggleConvertWeeksModalWeek(w)}
                     />
                     <label
@@ -3930,7 +4019,7 @@ export function BookingPage({
                         justifyContent: "space-between",
                         gap: "0.5rem",
                         cursor:
-                          converted || !stillHeld || convertWeekLoading
+                          converted || !pendingLocal || convertWeekLoading
                             ? "not-allowed"
                             : "pointer",
                         fontSize: "0.9rem",
@@ -3953,6 +4042,13 @@ export function BookingPage({
                         >
                           Already converted
                         </span>
+                      ) : stillHeld ? (
+                        <span
+                          className="weekly-meta"
+                          style={{ flexShrink: 0, whiteSpace: "nowrap", fontSize: "0.8rem" }}
+                        >
+                          Bulk hold (local)
+                        </span>
                       ) : null}
                     </label>
                   </li>
@@ -3973,7 +4069,7 @@ export function BookingPage({
                 className="secondary"
                 disabled={
                   convertWeekLoading ||
-                  ![...convertWeeksModalSelected].some((w) => isBulkWeekStillHeld(w))
+                  ![...convertWeeksModalSelected].some((w) => isWeekPendingLocalConvert(w))
                 }
                 title="Mark weeks converted in this app only — no Club Locker changes. Seeds booked occurrences for weekly emails."
                 onClick={() => {
@@ -3982,27 +4078,29 @@ export function BookingPage({
               >
                 {convertWeekLoading ? "Working…" : "Mark selected locally"}
               </button>
-              <button
-                type="button"
-                className="primary"
-                disabled={
-                  convertWeekLoading ||
-                  ![...convertWeeksModalSelected].some((w) => isBulkWeekStillHeld(w))
-                }
-                aria-busy={convertWeekLoading}
-                onClick={() => {
-                  void submitConvertWeeksModal();
-                }}
-              >
-                {convertWeekLoading ? (
-                  <span className="booking-async-btn-inner">
-                    <Loader2 className="booking-async-spinner" size={13} aria-hidden strokeWidth={2} />
-                    Converting…
-                  </span>
-                ) : (
-                  "Convert selected"
-                )}
-              </button>
+              {hasActiveSeasonHoldForConvert ? (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={
+                    convertWeekLoading ||
+                    ![...convertWeeksModalSelected].some((w) => isBulkWeekStillHeld(w))
+                  }
+                  aria-busy={convertWeekLoading}
+                  onClick={() => {
+                    void submitConvertWeeksModal();
+                  }}
+                >
+                  {convertWeekLoading ? (
+                    <span className="booking-async-btn-inner">
+                      <Loader2 className="booking-async-spinner" size={13} aria-hidden strokeWidth={2} />
+                      Converting…
+                    </span>
+                  ) : (
+                    "Convert selected"
+                  )}
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
